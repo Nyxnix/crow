@@ -227,7 +227,13 @@ func (m *Model) perform(action string) tea.Cmd {
 		}, "unbanned")
 	case "delete":
 		if c.msgID == "" {
-			return nil
+			// Messages the user sent themselves are shown from a local echo and
+			// carry no Twitch message id (Twitch does not echo our own PRIVMSGs
+			// back with one), so there is nothing to delete by id. Say so rather
+			// than appear to do nothing.
+			return func() tea.Msg {
+				return actionResult{text: "no message id (your own sent messages can't be deleted here)", err: true}
+			}
 		}
 		return runAction(func(ctx context.Context) error {
 			return mod.DeleteMessage(ctx, c.msgID)
@@ -306,10 +312,14 @@ func (m *Model) renderCard(body string) string {
 
 	var b strings.Builder
 
-	// Header: who this is, and what they are in this channel.
+	// Header: who this is, and what they are in this channel. Badges render as
+	// the same inline images as in chat (or the text tag as a fallback), taken
+	// from the most recent message we hold for them.
 	title := s.name(chat.Message{Author: c.author, Color: cardColor(history)}).Render(c.author)
-	if tag := roleOf(history, s); tag != "" {
-		title = tag + " " + title
+	if len(history) > 0 {
+		if seg, _ := renderBadges(history[len(history)-1], s, m.gfx); seg != "" {
+			title = seg + title
+		}
 	}
 	b.WriteString(title + "\n")
 	if c.login != "" && !strings.EqualFold(c.login, c.author) {
@@ -384,16 +394,6 @@ func cardColor(history []chat.Message) string {
 	for _, h := range history {
 		if h.Color != "" {
 			return h.Color
-		}
-	}
-	return ""
-}
-
-// roleOf finds the subject's highest role from their messages.
-func roleOf(history []chat.Message, s *styles) string {
-	for _, h := range history {
-		if tag := s.roleTag(h); tag != "" {
-			return tag
 		}
 	}
 	return ""

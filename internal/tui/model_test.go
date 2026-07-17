@@ -512,6 +512,49 @@ func TestDeleteTargetsTheClickedMessage(t *testing.T) {
 	}
 }
 
+// A message with no id (the user's own locally-echoed messages) can't be
+// deleted; pressing d must explain that rather than do nothing.
+func TestDeleteWithoutIDExplains(t *testing.T) {
+	f := &fakeMod{}
+	m := NewModel(Options{Channel: "buh", Incoming: make(chan chat.Message), Mod: f})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	// No ID, as an echoed own-message has.
+	m.append(chat.Message{ID: "", AuthorID: "42", Author: "nyx", AuthorLogin: "nyx", Text: "buh"})
+	m.View()
+	click(m, 7, 0)
+	if m.card == nil {
+		t.Fatal("no card")
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	if cmd == nil {
+		t.Fatal("delete with no id produced no feedback command")
+	}
+	m.Update(cmd())
+	if f.deleted != "" {
+		t.Error("attempted to delete a message with no id")
+	}
+	if !m.card.statusErr || !strings.Contains(m.card.status, "no message id") {
+		t.Errorf("status = %q, want an explanation about the missing id", m.card.status)
+	}
+}
+
+// The card header shows the subject's badges — as the text tag when graphics
+// are off (the image path is covered by the kitty package tests).
+func TestCardHeaderShowsBadges(t *testing.T) {
+	m := newTestModel(t, 100, 20,
+		chat.Message{ID: "1", AuthorID: "1", Author: "alice", AuthorLogin: "alice", Text: "hi", Broadcaster: true})
+	// The "[B] " text tag shifts the name right by 4 columns (timestamp 6 + tag 4).
+	click(m, 11, 0)
+	if m.card == nil {
+		t.Fatal("no card")
+	}
+	// renderCard is reached through View; the broadcaster tag must appear in it.
+	if !strings.Contains(m.View(), "[B]") {
+		t.Errorf("card header missing the badge/role marker:\n%s", m.View())
+	}
+}
+
 // Without a login there is nothing to moderate with; keys must not silently do
 // nothing, they must say why.
 func TestActionsWithoutLoginExplain(t *testing.T) {
