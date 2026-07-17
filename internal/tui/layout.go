@@ -1,0 +1,179 @@
+package tui
+
+import (
+	"strings"
+
+	"github.com/mattn/go-runewidth"
+
+	"github.com/Nyxnix/typetype/internal/chat"
+)
+
+// continuationIndent is the hanging indent on wrapped lines, which keeps the
+// author column readable when messages are long.
+const continuationIndent = 2
+
+// hit records where a clickable username landed on screen. The renderer is the
+// only thing that knows this, so it has to hand it back rather than have the
+// click handler guess.
+type hit struct {
+	row    int // 0-based row within the chat viewport
+	x0, x1 int // columns [x0, x1)
+	msg    int // index into the model's message slice
+}
+
+// line is one laid-out screen line.
+type line struct {
+	text string
+	hit  *hit // non-nil when this line contains a username
+}
+
+// layout renders messages into screen lines and records where each username
+// landed. Widths are measured with runewidth because CJK and emoji occupy two
+// terminal cells: measuring in runes would misplace every hit box after them.
+func layout(msgs []chat.Message, width int, style *styles) []line {
+	if width < 20 {
+		width = 20 // below this, wrapping degenerates; clamp rather than loop forever
+	}
+
+	var out []line
+	for i, m := range msgs {
+		name := m.Author
+
+		// The role marker stands in for the badge images the overlay shows. It
+		// sits before the name, so it shifts the name's hit box right by its
+		// width plus the space after it.
+		tag := style.roleTag(m)
+		tagW := 0
+		if tag != "" {
+			tagW = lipglossWidth(tag) + 1
+		}
+
+		prefixW := tagW + runewidth.StringWidth(name) + 2 // name + ": "
+
+		// A name wider than the line has nothing sensible to wrap against; give
+		// the text its own lines instead of a negative budget.
+		firstW := width - prefixW
+		if firstW < 8 {
+			firstW = width
+		}
+
+		chunks := wrap(m.Text, firstW, width-continuationIndent)
+
+		first := ""
+		if len(chunks) > 0 {
+			first = chunks[0]
+		}
+
+		h := &hit{
+			row: len(out),
+			x0:  tagW,
+			x1:  tagW + runewidth.StringWidth(name),
+			msg: i,
+		}
+
+		var b strings.Builder
+		if tag != "" {
+			b.WriteString(tag + " ")
+		}
+		b.WriteString(style.name(m).Render(name))
+		b.WriteString(style.punct.Render(": "))
+		b.WriteString(style.text.Render(first))
+		out = append(out, line{text: b.String(), hit: h})
+
+		for _, c := range chunks[1:] {
+			out = append(out, line{
+				text: strings.Repeat(" ", continuationIndent) + style.text.Render(c),
+			})
+		}
+	}
+	return out
+}
+
+// wrap breaks text into chunks that fit firstW display columns on the first
+// line and restW on the rest.
+//
+// It breaks on spaces, and hard-splits any single word too long to ever fit
+// (pasted URLs, emote spam) rather than letting it overflow the viewport.
+func wrap(text string, firstW, restW int) []string {
+	if firstW < 1 {
+		firstW = 1
+	}
+	if restW < 1 {
+		restW = 1
+	}
+
+	var out []string
+	cur, curW := "", 0
+
+	// Only the first emitted line gets the narrower first-line budget.
+	avail := func() int {
+		if len(out) == 0 {
+			return firstW
+		}
+		return restW
+	}
+	push := func() {
+		out = append(out, cur)
+		cur, curW = "", 0
+	}
+
+	for _, word := range strings.Fields(text) {
+		for {
+			wW := runewidth.StringWidth(word)
+			sep := 0
+			if curW > 0 {
+				sep = 1
+			}
+
+			if curW+sep+wW <= avail() {
+				if sep == 1 {
+					cur += " "
+					curW++
+				}
+				cur += word
+				curW += wW
+				break
+			}
+
+			// Doesn't fit here; a fresh line may be enough.
+			if curW > 0 {
+				push()
+				continue
+			}
+
+			// Alone on a line and still too wide: split it by display column.
+			piece, rest := takeWidth(word, avail())
+			if piece == "" {
+				// avail() is at least 1 and takeWidth returned nothing, meaning a
+				// single glyph is wider than the line. Emit it anyway; refusing
+				// to make progress here would loop forever.
+				piece, rest = word, ""
+			}
+			cur, curW = piece, runewidth.StringWidth(piece)
+			if rest == "" {
+				break
+			}
+			push()
+			word = rest
+		}
+	}
+
+	if curW > 0 || len(out) == 0 {
+		out = append(out, cur)
+	}
+	return out
+}
+
+// takeWidth splits s into the longest prefix fitting width display columns and
+// the remainder. It measures per rune because CJK and emoji are two cells wide.
+func takeWidth(s string, width int) (prefix, rest string) {
+	w := 0
+	for i, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if w+rw > width {
+			return s[:i], s[i:]
+		}
+		w += rw
+	}
+	return s, ""
+}

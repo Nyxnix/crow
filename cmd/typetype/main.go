@@ -7,20 +7,25 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/Nyxnix/typetype/internal/chat"
 	"github.com/Nyxnix/typetype/internal/emote"
 	"github.com/Nyxnix/typetype/internal/overlay"
+	"github.com/Nyxnix/typetype/internal/tui"
 	"github.com/Nyxnix/typetype/internal/twitch"
 )
 
 func main() {
 	channel := flag.String("channel", "", "Twitch channel to read (required)")
 	addr := flag.String("addr", "127.0.0.1:7788", "address for the overlay server")
+	headless := flag.Bool("headless", false, "serve the overlay without the terminal UI")
 	flag.Parse()
 
 	if *channel == "" {
@@ -29,44 +34,78 @@ func main() {
 		os.Exit(2)
 	}
 
+	if err := run(*channel, *addr, *headless); err != nil {
+		fmt.Fprintln(os.Stderr, "typetype:", err)
+		os.Exit(1)
+	}
+}
+
+func run(channel, addr string, headless bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	ov := overlay.New()
-	srv := &http.Server{Addr: *addr, Handler: ov.Handler()}
-	go func() {
-		log.Printf("overlay: http://%s", *addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("overlay: %v", err)
-		}
-	}()
+	srv := &http.Server{Addr: addr, Handler: ov.Handler()}
+	// Bind before starting the UI so a port clash is a plain error message
+	// rather than something that scrolls past behind a full-screen TUI.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("overlay: %w", err)
+	}
+	go srv.Serve(ln)
 	defer srv.Close()
 
 	emotes := emote.New()
 
-	// ROOMSTATE arrives right after JOIN and fires again on every reconnect;
-	// load once and let later reconnects reuse what we already have.
+	// Messages are fanned out here: the overlay needs every message, and so does
+	// the TUI, but they consume at different rates.
+	fromIRC := make(chan chat.Message, 256)
+	toTUI := make(chan chat.Message, 256)
+
+	// ROOMSTATE arrives after JOIN and again on every reconnect; load once.
 	var loadOnce sync.Once
 	tw := &twitch.Client{
-		Channel: *channel,
-		Out:     make(chan chat.Message, 256),
+		Channel: channel,
+		Out:     fromIRC,
 		OnRoomID: func(id string) {
 			loadOnce.Do(func() {
 				go func() {
 					if err := emotes.Load(ctx, id); err != nil {
 						log.Printf("emotes: %v", err)
-						return
 					}
-					log.Printf("emotes: %d loaded for room %s", emotes.Len(), id)
 				}()
 			})
 		},
 	}
 	go tw.Run(ctx)
 
-	for m := range tw.Out {
-		emotes.Apply(&m)
-		ov.Publish(m)
-		log.Printf("%s: %s", m.Author, m.Text)
+	go func() {
+		defer close(toTUI)
+		for m := range fromIRC {
+			emotes.Apply(&m)
+			ov.Publish(m)
+			select {
+			case toTUI <- m:
+			default: // ponytail: drop rather than stall the overlay if the UI lags
+			}
+		}
+	}()
+
+	if headless {
+		log.Printf("overlay: http://%s", addr)
+		for range toTUI {
+		}
+		return nil
 	}
+
+	model := tui.NewModel(tui.Options{
+		Channel:  channel,
+		Incoming: toTUI,
+		Emotes:   emotes,
+		Clients:  ov.Clients,
+	})
+
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
+	_, err = p.Run()
+	return err
 }
