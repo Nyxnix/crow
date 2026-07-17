@@ -32,6 +32,12 @@ type Client struct {
 
 	// Out receives every parsed message. Run closes it on return.
 	Out chan chat.Message
+
+	// OnRoomID is called with the channel's numeric Twitch ID once Twitch sends
+	// ROOMSTATE after JOIN. This is the cheapest source of the channel ID: every
+	// other route needs an API call, and the emote providers are all keyed by it.
+	// It fires on every reconnect, so it must tolerate being called repeatedly.
+	OnRoomID func(id string)
 }
 
 // Run connects and pumps messages into Out until ctx is cancelled, reconnecting
@@ -110,6 +116,10 @@ func (c *Client) session(ctx context.Context) error {
 			// Twitch pings every ~5min and disconnects if we don't echo it back.
 			if _, err := conn.Write([]byte("PONG :tmi.twitch.tv\r\n")); err != nil {
 				return err
+			}
+		case "ROOMSTATE":
+			if id := line.tags["room-id"]; id != "" && c.OnRoomID != nil {
+				c.OnRoomID(id)
 			}
 		case "PRIVMSG":
 			msg, ok := toMessage(line)

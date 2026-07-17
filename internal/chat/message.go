@@ -23,6 +23,11 @@ type Emote struct {
 	URL   string // highest quality the provider offers
 	Start int
 	End   int
+
+	// ZeroWidth marks a 7TV overlay emote, which is drawn on top of the emote
+	// before it rather than taking its own space. Rendered inline it would look
+	// like an unrelated image sitting next to the one it belongs on.
+	ZeroWidth bool
 }
 
 // Badge is a small image shown before the author's name (broadcaster, mod,

@@ -55,6 +55,7 @@ type wireEmote struct {
 	Name  string `json:"name"`
 	Start int    `json:"start"`
 	End   int    `json:"end"`
+	Zero  bool   `json:"zero,omitempty"` // 7TV overlay emote; drawn on the one before it
 }
 
 type wireBadge struct {
@@ -74,7 +75,7 @@ func (s *Server) Publish(m chat.Message) {
 		Badges: make([]wireBadge, 0, len(m.Badges)),
 	}
 	for _, e := range m.Emotes {
-		w.Emotes = append(w.Emotes, wireEmote{URL: e.URL, Name: e.Name, Start: e.Start, End: e.End})
+		w.Emotes = append(w.Emotes, wireEmote{URL: e.URL, Name: e.Name, Start: e.Start, End: e.End, Zero: e.ZeroWidth})
 	}
 	for _, b := range m.Badges {
 		if b.URL == "" {

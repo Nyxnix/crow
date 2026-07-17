@@ -91,6 +91,23 @@
     margin: -0.25em 0.04em;
   }
 
+  /* A 7TV overlay emote stacks on the emote before it. The stack is an
+     inline-block so the group occupies one emote's worth of space, and each
+     overlay is absolutely positioned over the base. */
+  .stack {
+    position: relative;
+    display: inline-block;
+    vertical-align: middle;
+  }
+
+  .stack > .emote.zero {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    margin: 0;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .msg.animate { animation: none; }
   }
@@ -154,23 +171,44 @@
   // Emote offsets index code points, not UTF-16 units, so the text must be
   // split with Array.from. Indexing a JS string directly would misplace every
   // emote in a message containing astral characters or CJK.
+  function emoteImg(e, cls) {
+    const img = document.createElement("img");
+    img.className = cls;
+    img.src = e.url;
+    img.alt = e.name;
+    img.title = e.name;
+    return img;
+  }
+
   function renderBody(text, emotes) {
     const frag = document.createDocumentFragment();
     const runes = Array.from(text);
     const sorted = (emotes || []).slice().sort((a, b) => a.start - b.start);
 
     let at = 0;
+    let stack = null; // the emote group a following zero-width emote attaches to
+
     for (const e of sorted) {
       if (e.start < at || e.end > runes.length) continue; // overlapping or stale range
+
+      // A zero-width emote only means anything if it directly follows an emote
+      // with nothing but the separating space between them. Anywhere else it is
+      // just a normal emote, which is also how Twitch's own clients treat it.
+      const adjacent = stack && runes.slice(at, e.start).join("").trim() === "";
+      if (e.zero && adjacent) {
+        stack.append(emoteImg(e, "emote zero"));
+        at = e.end;
+        continue;
+      }
+
       if (e.start > at) frag.append(runes.slice(at, e.start).join(""));
-      const img = document.createElement("img");
-      img.className = "emote";
-      img.src = e.url;
-      img.alt = e.name;
-      img.title = e.name;
-      frag.append(img);
+      stack = document.createElement("span");
+      stack.className = "stack";
+      stack.append(emoteImg(e, "emote"));
+      frag.append(stack);
       at = e.end;
     }
+
     if (at < runes.length) frag.append(runes.slice(at).join(""));
     return frag;
   }

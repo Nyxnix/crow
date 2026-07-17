@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 
 	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/typetype/internal/emote"
 	"github.com/Nyxnix/typetype/internal/overlay"
 	"github.com/Nyxnix/typetype/internal/twitch"
 )
@@ -40,10 +42,30 @@ func main() {
 	}()
 	defer srv.Close()
 
-	tw := &twitch.Client{Channel: *channel, Out: make(chan chat.Message, 256)}
+	emotes := emote.New()
+
+	// ROOMSTATE arrives right after JOIN and fires again on every reconnect;
+	// load once and let later reconnects reuse what we already have.
+	var loadOnce sync.Once
+	tw := &twitch.Client{
+		Channel: *channel,
+		Out:     make(chan chat.Message, 256),
+		OnRoomID: func(id string) {
+			loadOnce.Do(func() {
+				go func() {
+					if err := emotes.Load(ctx, id); err != nil {
+						log.Printf("emotes: %v", err)
+						return
+					}
+					log.Printf("emotes: %d loaded for room %s", emotes.Len(), id)
+				}()
+			})
+		},
+	}
 	go tw.Run(ctx)
 
 	for m := range tw.Out {
+		emotes.Apply(&m)
 		ov.Publish(m)
 		log.Printf("%s: %s", m.Author, m.Text)
 	}
