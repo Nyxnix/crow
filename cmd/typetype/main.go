@@ -104,6 +104,8 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 
 	fromIRC := make(chan chat.Message, 256)
 	toTUI := make(chan chat.Message, 256)
+	modIRC := make(chan chat.ModEvent, 64) // deletions/timeouts/bans from the reader
+	toTUIMod := make(chan chat.ModEvent, 64)
 
 	// The reader is anonymous even when logged in. An authenticated connection
 	// never receives its own PRIVMSGs, so it would never see the user's own
@@ -115,6 +117,7 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 	reader := &twitch.Client{
 		Channel: channel,
 		Out:     fromIRC,
+		Events:  modIRC,
 		OnRoomID: func(id string) {
 			loadOnce.Do(func() {
 				go func() {
@@ -164,6 +167,20 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 		}
 	}()
 
+	// Fan moderation events to the overlay (which removes the messages, so
+	// deleted or banned content does not linger on stream) and the TUI (which
+	// strikes them through for the moderator).
+	go func() {
+		defer close(toTUIMod)
+		for ev := range modIRC {
+			ov.Remove(ev)
+			select {
+			case toTUIMod <- ev:
+			default:
+			}
+		}
+	}()
+
 	if headless {
 		log.Printf("overlay: http://%s", addr)
 		for range toTUI {
@@ -181,13 +198,14 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 	}
 
 	model := tui.NewModel(tui.Options{
-		Channel:  channel,
-		Incoming: toTUI,
-		Emotes:   emotes,
-		Clients:  ov.Clients,
-		Mod:      mod,
-		Info:     infoProvider{&ivr.Client{}},
-		Send:     sendFn,
+		Channel:   channel,
+		Incoming:  toTUI,
+		ModEvents: toTUIMod,
+		Emotes:    emotes,
+		Clients:   ov.Clients,
+		Mod:       mod,
+		Info:      infoProvider{&ivr.Client{}},
+		Send:      sendFn,
 	})
 
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))

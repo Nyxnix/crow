@@ -63,8 +63,9 @@ type Model struct {
 	gfx    *kitty.Cache
 	redraw chan struct{}
 
-	incoming <-chan chat.Message
-	err      error
+	incoming  <-chan chat.Message
+	modEvents <-chan chat.ModEvent
+	err       error
 }
 
 type Options struct {
@@ -78,6 +79,10 @@ type Options struct {
 	// Send delivers a typed message. Leave nil for a read-only (not logged in)
 	// session; the input line then shows a hint instead of a prompt.
 	Send func(string)
+
+	// ModEvents delivers moderation actions (deletions, timeouts, bans) so the
+	// TUI can strike through the affected messages. Optional.
+	ModEvents <-chan chat.ModEvent
 }
 
 func NewModel(o Options) *Model {
@@ -92,16 +97,17 @@ func NewModel(o Options) *Model {
 	}
 
 	m := &Model{
-		channel:  o.Channel,
-		styles:   newStyles(),
-		emotes:   o.Emotes,
-		mod:      o.Mod,
-		info:     o.Info,
-		clients:  o.Clients,
-		send:     o.Send,
-		input:    ti,
-		incoming: o.Incoming,
-		redraw:   make(chan struct{}, 1),
+		channel:   o.Channel,
+		styles:    newStyles(),
+		emotes:    o.Emotes,
+		mod:       o.Mod,
+		info:      o.Info,
+		clients:   o.Clients,
+		send:      o.Send,
+		input:     ti,
+		incoming:  o.Incoming,
+		modEvents: o.ModEvents,
+		redraw:    make(chan struct{}, 1),
 	}
 	if kitty.Supported() {
 		// onReady coalesces: a full buffer just means a redraw is already
@@ -146,6 +152,19 @@ func waitRedraw(ch <-chan struct{}) tea.Cmd {
 	}
 }
 
+// modEventArrived carries a moderation action into the update loop.
+type modEventArrived chat.ModEvent
+
+func waitModEvent(ch <-chan chat.ModEvent) tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return modEventArrived(ev)
+	}
+}
+
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{waitForChat(m.incoming)}
 	if m.send != nil {
@@ -153,6 +172,9 @@ func (m *Model) Init() tea.Cmd {
 	}
 	if m.gfx != nil {
 		cmds = append(cmds, waitRedraw(m.redraw))
+	}
+	if m.modEvents != nil {
+		cmds = append(cmds, waitModEvent(m.modEvents))
 	}
 	return tea.Batch(cmds...)
 }
@@ -196,6 +218,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case redrawMsg:
 		// A View will run when we return; just re-arm the waiter.
 		return m, waitRedraw(m.redraw)
+
+	case modEventArrived:
+		m.applyModEvent(chat.ModEvent(msg))
+		return m, waitModEvent(m.modEvents)
 	}
 
 	// Non-key, non-mouse messages (the cursor's blink ticks) belong to the
@@ -220,6 +246,26 @@ func (m *Model) append(msg chat.Message) {
 	// bottom every time someone talks.
 	if m.scroll > 0 {
 		m.scroll++
+	}
+}
+
+// applyModEvent strikes through the messages a moderation action affects.
+// Messages are kept, not removed, so a moderator can see what was deleted — the
+// same as Twitch's own moderator view.
+func (m *Model) applyModEvent(ev chat.ModEvent) {
+	for i := range m.msgs {
+		switch ev.Kind {
+		case chat.DeleteMessage:
+			if m.msgs[i].ID == ev.MessageID {
+				m.msgs[i].Deleted = true
+			}
+		case chat.ClearUser:
+			if m.msgs[i].AuthorID == ev.UserID {
+				m.msgs[i].Deleted = true
+			}
+		case chat.ClearAll:
+			m.msgs[i].Deleted = true
+		}
 	}
 }
 

@@ -61,7 +61,34 @@ type Message struct {
 	Subscriber  bool
 	VIP         bool
 
+	// Deleted marks a message removed by a moderator (via CLEARMSG) or cleared
+	// when its author was timed out or banned (via CLEARCHAT). The TUI keeps it
+	// struck through so moderators can see what happened.
+	Deleted bool
+
 	At time.Time
+}
+
+// ModEventKind is the sort of moderation action a ModEvent reports.
+type ModEventKind int
+
+const (
+	// DeleteMessage removes a single message, identified by MessageID.
+	DeleteMessage ModEventKind = iota
+	// ClearUser removes every message from a user (a timeout or ban).
+	ClearUser
+	// ClearAll clears the whole chat.
+	ClearAll
+)
+
+// ModEvent is a moderation action that affects messages already shown, rather
+// than a new message. It is delivered on its own channel so the UI can mark or
+// remove the messages it names.
+type ModEvent struct {
+	Kind      ModEventKind
+	MessageID string // DeleteMessage
+	UserID    string // ClearUser
+	Login     string // ClearUser / DeleteMessage author, for the overlay
 }
 
 // IsPrivileged reports whether the author outranks a regular viewer. Mod

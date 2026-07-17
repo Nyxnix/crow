@@ -40,6 +40,11 @@ type Client struct {
 	// It fires on every reconnect, so it must tolerate being called repeatedly.
 	OnRoomID func(id string)
 
+	// Events, when set, receives moderation actions (message deletions, user
+	// timeouts/bans, chat clears) parsed from CLEARMSG and CLEARCHAT. Sends are
+	// non-blocking, so a stalled consumer drops events rather than the read loop.
+	Events chan chat.ModEvent
+
 	// outbound carries messages queued by Send to the active session's writer.
 	// Created lazily via sendChan so a caller that never sends pays nothing.
 	outbound chan string
@@ -111,6 +116,17 @@ func (c *Client) serverAddr() string {
 func (c *Client) sendChan() chan string {
 	c.sendOnce.Do(func() { c.outbound = make(chan string, 32) })
 	return c.outbound
+}
+
+// emitEvent delivers a moderation event without blocking the read loop.
+func (c *Client) emitEvent(ev chat.ModEvent) {
+	if c.Events == nil {
+		return
+	}
+	select {
+	case c.Events <- ev:
+	default: // ponytail: drop if the consumer is behind; deletions are best-effort UI
+	}
 }
 
 // Send queues a chat message for the current connection. It never blocks: if
@@ -255,6 +271,28 @@ func (c *Client) session(ctx context.Context) error {
 				Badges:      parseBadges(line.tags["badges"]),
 			}
 			c.selfMu.Unlock()
+		case "CLEARMSG":
+			// A single message was deleted by a moderator.
+			if id := line.tags["target-msg-id"]; id != "" {
+				c.emitEvent(chat.ModEvent{
+					Kind:      chat.DeleteMessage,
+					MessageID: id,
+					Login:     line.tags["login"],
+				})
+			}
+		case "CLEARCHAT":
+			// With a target user this is a timeout or ban clearing that user's
+			// messages; the trailing param is their login. With no target it is a
+			// full chat clear.
+			if uid := line.tags["target-user-id"]; uid != "" {
+				login := ""
+				if len(line.params) >= 2 {
+					login = line.params[1]
+				}
+				c.emitEvent(chat.ModEvent{Kind: chat.ClearUser, UserID: uid, Login: login})
+			} else {
+				c.emitEvent(chat.ModEvent{Kind: chat.ClearAll})
+			}
 		case "PRIVMSG":
 			msg, ok := toMessage(line)
 			if !ok {

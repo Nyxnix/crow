@@ -44,6 +44,7 @@ func New() *Server {
 type wireMessage struct {
 	ID     string      `json:"id"`
 	Author string      `json:"author"`
+	Login  string      `json:"login"` // for removing a user's messages on a timeout/ban
 	Color  string      `json:"color"`
 	Text   string      `json:"text"`
 	Emotes []wireEmote `json:"emotes"`
@@ -69,6 +70,7 @@ func (s *Server) Publish(m chat.Message) {
 	w := wireMessage{
 		ID:     m.ID,
 		Author: m.Author,
+		Login:  m.AuthorLogin,
 		Color:  m.Color,
 		Text:   m.Text,
 		Emotes: make([]wireEmote, 0, len(m.Emotes)),
@@ -84,16 +86,45 @@ func (s *Server) Publish(m chat.Message) {
 		w.Badges = append(w.Badges, wireBadge{URL: b.URL, Name: b.Name})
 	}
 
-	b, err := json.Marshal(w)
-	if err != nil {
-		return
+	if b, err := json.Marshal(w); err == nil {
+		s.broadcast(frame("message", b))
 	}
+}
 
+// Remove tells every browser source to remove the messages a moderation action
+// affects, so deleted or banned content does not stay on stream.
+func (s *Server) Remove(ev chat.ModEvent) {
+	payload := struct {
+		Kind  string `json:"kind"`
+		ID    string `json:"id,omitempty"`
+		Login string `json:"login,omitempty"`
+	}{ID: ev.MessageID, Login: ev.Login}
+	switch ev.Kind {
+	case chat.DeleteMessage:
+		payload.Kind = "message"
+	case chat.ClearUser:
+		payload.Kind = "user"
+	case chat.ClearAll:
+		payload.Kind = "all"
+	}
+	if b, err := json.Marshal(payload); err == nil {
+		s.broadcast(frame("remove", b))
+	}
+}
+
+// frame formats one SSE event with the given name and JSON data.
+func frame(event string, data []byte) []byte {
+	return []byte("event: " + event + "\ndata: " + string(data) + "\n\n")
+}
+
+// broadcast delivers a pre-formatted SSE frame to every client, dropping it for
+// any that have fallen behind.
+func (s *Server) broadcast(f []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ch := range s.clients {
 		select {
-		case ch <- b:
+		case ch <- f:
 		default: // ponytail: drop for slow clients; add per-client backpressure if OBS ever needs replay
 		}
 	}
@@ -160,8 +191,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case b := <-ch:
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+		case f := <-ch:
+			// f is a complete SSE frame ("event: ...\ndata: ...\n\n").
+			if _, err := w.Write(f); err != nil {
 				return
 			}
 			rc.Flush()

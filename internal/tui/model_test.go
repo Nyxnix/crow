@@ -539,6 +539,64 @@ func TestDeleteWithoutIDExplains(t *testing.T) {
 	}
 }
 
+// A CLEARMSG marks one message deleted; a CLEARCHAT for a user marks all of
+// theirs; a full clear marks everything. Messages are kept, not removed.
+func TestApplyModEvents(t *testing.T) {
+	fresh := func() *Model {
+		return newTestModel(t, 80, 20,
+			chat.Message{ID: "m1", AuthorID: "1", Author: "alice", Text: "one"},
+			chat.Message{ID: "m2", AuthorID: "2", Author: "bob", Text: "two"},
+			chat.Message{ID: "m3", AuthorID: "1", Author: "alice", Text: "three"},
+		)
+	}
+
+	// Delete a single message by id.
+	m := fresh()
+	m.applyModEvent(chat.ModEvent{Kind: chat.DeleteMessage, MessageID: "m2"})
+	if !m.msgs[1].Deleted || m.msgs[0].Deleted || m.msgs[2].Deleted {
+		t.Errorf("delete by id hit the wrong messages: %v", deletedFlags(m))
+	}
+
+	// Clear a user: every message from that user id.
+	m = fresh()
+	m.applyModEvent(chat.ModEvent{Kind: chat.ClearUser, UserID: "1"})
+	if !m.msgs[0].Deleted || m.msgs[1].Deleted || !m.msgs[2].Deleted {
+		t.Errorf("clear user hit the wrong messages: %v", deletedFlags(m))
+	}
+
+	// Clear all.
+	m = fresh()
+	m.applyModEvent(chat.ModEvent{Kind: chat.ClearAll})
+	for i, msg := range m.msgs {
+		if !msg.Deleted {
+			t.Errorf("message %d not marked deleted on clear-all", i)
+		}
+	}
+
+	// Messages are kept (struck through), not removed.
+	if len(m.msgs) != 3 {
+		t.Errorf("clear-all removed messages (%d left); they should be kept", len(m.msgs))
+	}
+}
+
+// A deleted message renders struck through with a marker.
+func TestDeletedMessageRendered(t *testing.T) {
+	m := newTestModel(t, 80, 20, chat.Message{ID: "m1", AuthorID: "1", Author: "alice", Text: "oops"})
+	m.applyModEvent(chat.ModEvent{Kind: chat.DeleteMessage, MessageID: "m1"})
+	view := m.View()
+	if !strings.Contains(view, "deleted") {
+		t.Errorf("deleted message missing its marker:\n%s", view)
+	}
+}
+
+func deletedFlags(m *Model) []bool {
+	out := make([]bool, len(m.msgs))
+	for i := range m.msgs {
+		out[i] = m.msgs[i].Deleted
+	}
+	return out
+}
+
 // The card header shows the subject's badges — as the text tag when graphics
 // are off (the image path is covered by the kitty package tests).
 func TestCardHeaderShowsBadges(t *testing.T) {

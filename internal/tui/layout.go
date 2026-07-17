@@ -123,17 +123,27 @@ func layout(msgs []chat.Message, width int, style *styles, gfx *kitty.Cache) []l
 			msg: i,
 		}
 
+		// A deleted message keeps its place but is struck through, so a moderator
+		// can see what was removed — the same as Twitch's own moderator view.
+		textStyle := style.text
+		if m.Deleted {
+			textStyle = style.deleted
+		}
+
 		var b strings.Builder
 		b.WriteString(style.dim.Render(ts))
 		b.WriteString(badgeStr)
 		b.WriteString(style.name(m).Render(name))
 		b.WriteString(style.punct.Render(": "))
-		b.WriteString(style.text.Render(first))
+		b.WriteString(textStyle.Render(first))
+		if m.Deleted {
+			b.WriteString(style.dim.Render(" ✗ deleted"))
+		}
 		out = append(out, line{text: b.String(), hit: h})
 
 		for _, c := range chunks[1:] {
 			out = append(out, line{
-				text: strings.Repeat(" ", continuationIndent) + style.text.Render(c),
+				text: strings.Repeat(" ", continuationIndent) + textStyle.Render(c),
 			})
 		}
 	}

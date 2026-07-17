@@ -220,6 +220,9 @@
 
     const el = document.createElement("div");
     el.className = "msg" + (cfg.animate ? " animate" : "");
+    // Tag the element so a moderation event can find and remove it.
+    if (m.id) el.dataset.id = m.id;
+    if (m.login) el.dataset.login = m.login.toLowerCase();
 
     if (cfg.badges) {
       for (const b of m.badges || []) {
@@ -259,16 +262,36 @@
     }
   }
 
+  // A moderation action removes the affected messages, so deleted or banned
+  // content does not stay on stream.
+  function removeMessages(r) {
+    if (r.kind === "all") {
+      chat.replaceChildren();
+    } else if (r.kind === "user" && r.login) {
+      const login = r.login.toLowerCase();
+      for (const el of chat.querySelectorAll(`.msg[data-login="${CSS.escape(login)}"]`)) el.remove();
+    } else if (r.kind === "message" && r.id) {
+      for (const el of chat.querySelectorAll(`.msg[data-id="${CSS.escape(r.id)}"]`)) el.remove();
+    }
+  }
+
   // EventSource reconnects on its own, which is what makes an OBS browser
   // source survive a TypeType restart without anyone touching OBS.
   const es = new EventSource("/events");
-  es.onmessage = (ev) => {
+  es.addEventListener("message", (ev) => {
     try {
       addMessage(JSON.parse(ev.data));
     } catch (err) {
       console.error("typetype: bad message", err);
     }
-  };
+  });
+  es.addEventListener("remove", (ev) => {
+    try {
+      removeMessages(JSON.parse(ev.data));
+    } catch (err) {
+      console.error("typetype: bad remove", err);
+    }
+  });
 })();
 </script>
 </body>

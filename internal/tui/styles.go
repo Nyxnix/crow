@@ -24,7 +24,8 @@ type styles struct {
 	badgeVIP         lipgloss.Style
 	badgeSub         lipgloss.Style
 
-	danger lipgloss.Style
+	danger  lipgloss.Style
+	deleted lipgloss.Style
 }
 
 func newStyles() *styles {
@@ -47,7 +48,8 @@ func newStyles() *styles {
 		badgeVIP:         lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true),
 		badgeSub:         lipgloss.NewStyle().Foreground(lipgloss.Color("111")),
 
-		danger: lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true),
+		danger:  lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true),
+		deleted: lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Strikethrough(true),
 	}
 }
 

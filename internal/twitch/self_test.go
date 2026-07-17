@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Nyxnix/typetype/internal/chat"
 )
 
 // USERSTATE must populate the self-state so a sent-message echo can look like
@@ -73,6 +75,67 @@ func TestEchoFallsBackBeforeUserState(t *testing.T) {
 	if e.Broadcaster || e.Subscriber || len(e.Badges) != 0 {
 		t.Error("echo claimed roles it has no USERSTATE to back")
 	}
+}
+
+// CLEARMSG (one message deleted) and CLEARCHAT (a user cleared, or the whole
+// chat) must turn into the right moderation events.
+func TestModEventsFromClearCommands(t *testing.T) {
+	c := &Client{Channel: "buh", Events: make(chan chat.ModEvent, 4)}
+
+	feed := func(raw string) chat.ModEvent {
+		t.Helper()
+		line, ok := parseLine(raw)
+		if !ok {
+			t.Fatalf("parse failed: %q", raw)
+		}
+		switch line.cmd {
+		case "CLEARMSG":
+			if id := line.tags["target-msg-id"]; id != "" {
+				c.emitEvent(chat.ModEvent{Kind: chat.DeleteMessage, MessageID: id, Login: line.tags["login"]})
+			}
+		case "CLEARCHAT":
+			if uid := line.tags["target-user-id"]; uid != "" {
+				login := ""
+				if len(line.params) >= 2 {
+					login = line.params[1]
+				}
+				c.emitEvent(chat.ModEvent{Kind: chat.ClearUser, UserID: uid, Login: login})
+			} else {
+				c.emitEvent(chat.ModEvent{Kind: chat.ClearAll})
+			}
+		}
+		select {
+		case ev := <-c.Events:
+			return ev
+		default:
+			t.Fatal("no event emitted")
+			return chat.ModEvent{}
+		}
+	}
+
+	// A single deleted message.
+	ev := feed(`@login=baduser;target-msg-id=abc-123 :tmi.twitch.tv CLEARMSG #buh :some bad message`)
+	if ev.Kind != chat.DeleteMessage || ev.MessageID != "abc-123" || ev.Login != "baduser" {
+		t.Errorf("CLEARMSG -> %+v", ev)
+	}
+
+	// A timeout/ban clearing one user's messages; trailing param is their login.
+	ev = feed(`@ban-duration=600;target-user-id=42;room-id=1 :tmi.twitch.tv CLEARCHAT #buh :baduser`)
+	if ev.Kind != chat.ClearUser || ev.UserID != "42" || ev.Login != "baduser" {
+		t.Errorf("CLEARCHAT(user) -> %+v", ev)
+	}
+
+	// A full chat clear has no target.
+	ev = feed(`@room-id=1 :tmi.twitch.tv CLEARCHAT #buh`)
+	if ev.Kind != chat.ClearAll {
+		t.Errorf("CLEARCHAT(all) -> %+v", ev)
+	}
+}
+
+// emitEvent must not block or panic when no Events channel is set.
+func TestEmitEventWithoutChannel(t *testing.T) {
+	c := &Client{Channel: "buh"} // no Events
+	c.emitEvent(chat.ModEvent{Kind: chat.ClearAll})
 }
 
 func TestApplyBadgeRoles(t *testing.T) {
