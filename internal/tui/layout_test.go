@@ -80,7 +80,7 @@ func TestWrapDegenerateWidth(t *testing.T) {
 
 func TestLayoutRecordsNameHit(t *testing.T) {
 	msgs := []chat.Message{{Author: "nyx", Text: "hello"}}
-	lines := layout(msgs, 40, newStyles())
+	lines := layout(msgs, 40, newStyles(), nil)
 
 	if len(lines) != 1 {
 		t.Fatalf("got %d lines, want 1", len(lines))
@@ -99,7 +99,7 @@ func TestLayoutRecordsNameHit(t *testing.T) {
 // for anyone with a CJK display name.
 func TestLayoutHitBoxIsDisplayWidth(t *testing.T) {
 	msgs := []chat.Message{{Author: "日本語", Text: "hi"}}
-	lines := layout(msgs, 40, newStyles())
+	lines := layout(msgs, 40, newStyles(), nil)
 
 	h := lines[0].hit
 	if h == nil {
@@ -114,8 +114,8 @@ func TestLayoutHitBoxIsDisplayWidth(t *testing.T) {
 // A role marker is printed before the name, so the hit box must shift right by
 // its width. Without this, clicking a broadcaster or mod's name lands short.
 func TestLayoutHitBoxShiftsPastRoleTag(t *testing.T) {
-	plain := layout([]chat.Message{{Author: "nyx", Text: "hi"}}, 40, newStyles())
-	tagged := layout([]chat.Message{{Author: "nyx", Text: "hi", Broadcaster: true}}, 40, newStyles())
+	plain := layout([]chat.Message{{Author: "nyx", Text: "hi"}}, 40, newStyles(), nil)
+	tagged := layout([]chat.Message{{Author: "nyx", Text: "hi", Broadcaster: true}}, 40, newStyles(), nil)
 
 	ph, th := plain[0].hit, tagged[0].hit
 	if ph == nil || th == nil {
@@ -141,7 +141,7 @@ func TestLayoutHitsAcrossWrappedMessages(t *testing.T) {
 		{Author: "a", Text: strings.Repeat("word ", 20)},
 		{Author: "b", Text: "short"},
 	}
-	lines := layout(msgs, 30, newStyles())
+	lines := layout(msgs, 30, newStyles(), nil)
 
 	var hits []hit
 	for _, l := range lines {
@@ -164,6 +164,25 @@ func TestLayoutHitsAcrossWrappedMessages(t *testing.T) {
 	}
 }
 
+// Without graphics, badges fall back to a single text role tag, and the name's
+// hit box shifts past it.
+func TestRenderBadgesTextFallback(t *testing.T) {
+	s := newStyles()
+	// A broadcaster with no graphics cache: the [B] tag stands in.
+	str, w := renderBadges(chat.Message{Broadcaster: true}, s, nil)
+	if !strings.Contains(str, "[B]") {
+		t.Errorf("fallback = %q, want the [B] tag", str)
+	}
+	if w != lipglossWidth(s.roleTag(chat.Message{Broadcaster: true}))+1 {
+		t.Errorf("width %d does not match the tag plus its trailing space", w)
+	}
+
+	// A plain user contributes no badge segment.
+	if str, w := renderBadges(chat.Message{}, s, nil); str != "" || w != 0 {
+		t.Errorf("plain user badges = (%q, %d), want empty", str, w)
+	}
+}
+
 func TestTimestampFormat(t *testing.T) {
 	at := time.Date(2026, 7, 17, 9, 5, 0, 0, time.UTC)
 	if got := timestamp(chat.Message{At: at}); got != "09:05 " {
@@ -178,7 +197,7 @@ func TestTimestampFormat(t *testing.T) {
 // The timestamp is rendered before the name, and the name stays clickable.
 func TestLayoutRendersTimestamp(t *testing.T) {
 	at := time.Date(2026, 7, 17, 14, 30, 0, 0, time.UTC)
-	lines := layout([]chat.Message{{Author: "nyx", Text: "hi", At: at}}, 40, newStyles())
+	lines := layout([]chat.Message{{Author: "nyx", Text: "hi", At: at}}, 40, newStyles(), nil)
 	if !strings.Contains(lines[0].text, "14:30") {
 		t.Errorf("line %q missing the timestamp", lines[0].text)
 	}
@@ -190,7 +209,7 @@ func TestLayoutRendersTimestamp(t *testing.T) {
 func TestLayoutNarrowWidthDoesNotPanic(t *testing.T) {
 	msgs := []chat.Message{{Author: "averylongusernameindeed", Text: "some text here"}}
 	for _, w := range []int{1, 5, 10, 21} {
-		lines := layout(msgs, w, newStyles())
+		lines := layout(msgs, w, newStyles(), nil)
 		if len(lines) == 0 {
 			t.Errorf("width %d produced nothing", w)
 		}

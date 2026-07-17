@@ -6,11 +6,49 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/typetype/internal/kitty"
 )
 
 // continuationIndent is the hanging indent on wrapped lines, which keeps the
 // author column readable when messages are long.
 const continuationIndent = 2
+
+// renderBadges builds the badge segment shown before the author's name, and
+// reports its display width in cells so the caller can place the name's hit box.
+//
+// With a graphics cache and resolved badge URLs, badges render as inline images
+// separated by nothing and followed by one space. Until an image has loaded, or
+// on terminals without graphics, it falls back to a single text role tag so the
+// column is never empty for a privileged user.
+func renderBadges(m chat.Message, style *styles, gfx *kitty.Cache) (s string, width int) {
+	if gfx != nil {
+		var b strings.Builder
+		n := 0
+		for _, bd := range m.Badges {
+			if bd.URL == "" {
+				continue // unresolved badge has no image to show
+			}
+			img, cols, ok := gfx.Render(bd.URL)
+			if !ok {
+				continue // still loading; a redraw will bring it in
+			}
+			b.WriteString(img)
+			width += cols
+			n++
+		}
+		if n > 0 {
+			b.WriteString(" ")
+			return b.String(), width + 1
+		}
+		// Fall through to the text tag while images load.
+	}
+
+	tag := style.roleTag(m)
+	if tag == "" {
+		return "", 0
+	}
+	return tag + " ", lipglossWidth(tag) + 1
+}
 
 // timestamp formats a message's time as the "HH:MM " prefix shown before the
 // author. A message with no time (shouldn't happen for real ones) still gets a
@@ -40,7 +78,10 @@ type line struct {
 // layout renders messages into screen lines and records where each username
 // landed. Widths are measured with runewidth because CJK and emoji occupy two
 // terminal cells: measuring in runes would misplace every hit box after them.
-func layout(msgs []chat.Message, width int, style *styles) []line {
+//
+// gfx, when non-nil, renders badges as inline images; otherwise a text role tag
+// stands in.
+func layout(msgs []chat.Message, width int, style *styles, gfx *kitty.Cache) []line {
 	if width < 20 {
 		width = 20 // below this, wrapping degenerates; clamp rather than loop forever
 	}
@@ -54,16 +95,11 @@ func layout(msgs []chat.Message, width int, style *styles) []line {
 		ts := timestamp(m)
 		tsW := runewidth.StringWidth(ts)
 
-		// The role marker stands in for the badge images the overlay shows. It
-		// sits before the name, so it shifts the name's hit box right by its
-		// width plus the space after it.
-		tag := style.roleTag(m)
-		tagW := 0
-		if tag != "" {
-			tagW = lipglossWidth(tag) + 1
-		}
+		// Badges sit before the name and shift its hit box right. With graphics
+		// they render as images; without, a single text role tag stands in.
+		badgeStr, badgeW := renderBadges(m, style, gfx)
 
-		nameStart := tsW + tagW
+		nameStart := tsW + badgeW
 		prefixW := nameStart + runewidth.StringWidth(name) + 2 // name + ": "
 
 		// A name wider than the line has nothing sensible to wrap against; give
@@ -89,9 +125,7 @@ func layout(msgs []chat.Message, width int, style *styles) []line {
 
 		var b strings.Builder
 		b.WriteString(style.dim.Render(ts))
-		if tag != "" {
-			b.WriteString(tag + " ")
-		}
+		b.WriteString(badgeStr)
 		b.WriteString(style.name(m).Render(name))
 		b.WriteString(style.punct.Render(": "))
 		b.WriteString(style.text.Render(first))

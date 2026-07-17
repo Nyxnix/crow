@@ -12,6 +12,7 @@ import (
 
 	"github.com/Nyxnix/typetype/internal/chat"
 	"github.com/Nyxnix/typetype/internal/emote"
+	"github.com/Nyxnix/typetype/internal/kitty"
 )
 
 // historyLimit caps messages held in memory. The user card filters this slice
@@ -56,6 +57,12 @@ type Model struct {
 	send  func(string)
 	input textinput.Model
 
+	// gfx renders badge images inline on terminals that support the kitty
+	// graphics protocol; nil elsewhere, where badges fall back to text. redraw
+	// wakes the update loop when an image finishes loading so it can pop in.
+	gfx    *kitty.Cache
+	redraw chan struct{}
+
 	incoming <-chan chat.Message
 	err      error
 }
@@ -84,7 +91,7 @@ func NewModel(o Options) *Model {
 		ti.Focus()
 	}
 
-	return &Model{
+	m := &Model{
 		channel:  o.Channel,
 		styles:   newStyles(),
 		emotes:   o.Emotes,
@@ -94,7 +101,19 @@ func NewModel(o Options) *Model {
 		send:     o.Send,
 		input:    ti,
 		incoming: o.Incoming,
+		redraw:   make(chan struct{}, 1),
 	}
+	if kitty.Supported() {
+		// onReady coalesces: a full buffer just means a redraw is already
+		// pending, which is exactly what we want.
+		m.gfx = kitty.New(func() {
+			select {
+			case m.redraw <- struct{}{}:
+			default:
+			}
+		})
+	}
+	return m
 }
 
 // chatArrived carries one message from the IRC goroutine into the update loop.
@@ -115,10 +134,25 @@ func waitForChat(ch <-chan chat.Message) tea.Cmd {
 	}
 }
 
+// redrawMsg wakes the update loop so a just-loaded image can be drawn.
+type redrawMsg struct{}
+
+// waitRedraw blocks until an image loads, turning the redraw channel into a
+// bubbletea command, the same adapter pattern as waitForChat.
+func waitRedraw(ch <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		<-ch
+		return redrawMsg{}
+	}
+}
+
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{waitForChat(m.incoming)}
 	if m.send != nil {
 		cmds = append(cmds, textinput.Blink)
+	}
+	if m.gfx != nil {
+		cmds = append(cmds, waitRedraw(m.redraw))
 	}
 	return tea.Batch(cmds...)
 }
@@ -158,6 +192,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.card.infoErr = msg.err
 		}
 		return m, nil
+
+	case redrawMsg:
+		// A View will run when we return; just re-arm the waiter.
+		return m, waitRedraw(m.redraw)
 	}
 
 	// Non-key, non-mouse messages (the cursor's blink ticks) belong to the
@@ -323,7 +361,7 @@ func (m *Model) chatWidth() int {
 // out, which is cheap at this history size and avoids caching a number that
 // goes stale on every resize or card toggle.
 func (m *Model) maxScroll() int {
-	lines := layout(m.msgs, m.chatWidth(), m.styles)
+	lines := layout(m.msgs, m.chatWidth(), m.styles, m.gfx)
 	if n := len(lines) - m.viewportHeight(); n > 0 {
 		return n
 	}
@@ -335,7 +373,7 @@ func (m *Model) View() string {
 		return "" // no size yet; bubbletea sends one immediately
 	}
 
-	lines := layout(m.msgs, m.chatWidth(), m.styles)
+	lines := layout(m.msgs, m.chatWidth(), m.styles, m.gfx)
 	vh := m.viewportHeight()
 
 	// Take the window ending `scroll` lines from the bottom.
@@ -375,7 +413,15 @@ func (m *Model) View() string {
 	if m.send != nil {
 		out += "\n" + m.inputLine()
 	}
-	return out + "\n" + m.statusBar()
+	frame := out + "\n" + m.statusBar()
+
+	// Upload any newly-loaded images once, at the very top of the frame, before
+	// the placeholder cells that reference them. The upload sequences are
+	// zero-width, so they do not disturb layout.
+	if m.gfx != nil {
+		frame = m.gfx.FlushUploads() + frame
+	}
+	return frame
 }
 
 // inputLine renders the message composer. It shows the text field when logged
