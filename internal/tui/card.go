@@ -26,8 +26,31 @@ const cardGutter = 2
 // cardHistory is how many of the user's own messages the card shows.
 const cardHistory = 12
 
-// card is the open user card: who it's about, and the result of the last action
-// taken from it.
+// UserInfo is the account/subscription detail the card shows beyond the local
+// message buffer, matching the top of Twitch's own mod card.
+type UserInfo struct {
+	CreatedAt  time.Time
+	FollowedAt *time.Time // nil if not following or hidden
+	SubTier    string     // "1"/"2"/"3", empty if not subscribed
+	SubMonths  int
+	SubHidden  bool
+}
+
+// InfoProvider fetches UserInfo for the card. It is nil when unavailable (for
+// example not logged in), in which case the card just omits that section.
+type InfoProvider interface {
+	CardInfo(ctx context.Context, userLogin, channel string) (UserInfo, error)
+}
+
+// cardInfoLoaded delivers an async CardInfo result back into the update loop.
+type cardInfoLoaded struct {
+	userID string
+	info   UserInfo
+	err    bool
+}
+
+// card is the open user card: who it's about, the async-loaded account detail,
+// and the result of the last action taken from it.
 type card struct {
 	userID string
 	login  string
@@ -35,6 +58,11 @@ type card struct {
 
 	// msgID is the message that was clicked, which is the one 'd' deletes.
 	msgID string
+
+	// info is the account/sub detail, nil until the fetch returns. infoErr marks
+	// a fetch that failed so the card can say so rather than spin forever.
+	info    *UserInfo
+	infoErr bool
 
 	status    string
 	statusErr bool
@@ -55,9 +83,12 @@ var timeoutPresets = []struct {
 	{"5", 86400, "24h"},
 }
 
-func (m *Model) openCard(msgIdx int) {
+// openCard opens the card for a message's author and returns a command that
+// fetches their account detail, or nil if there is nothing to open or no info
+// provider is configured.
+func (m *Model) openCard(msgIdx int) tea.Cmd {
 	if msgIdx < 0 || msgIdx >= len(m.msgs) {
-		return
+		return nil
 	}
 	src := m.msgs[msgIdx]
 	m.card = &card{
@@ -65,6 +96,18 @@ func (m *Model) openCard(msgIdx int) {
 		login:  src.AuthorLogin,
 		author: src.Author,
 		msgID:  src.ID,
+	}
+
+	if m.info == nil || src.AuthorLogin == "" {
+		return nil
+	}
+	login, channel, userID := src.AuthorLogin, m.channel, src.AuthorID
+	provider := m.info
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		info, err := provider.CardInfo(ctx, login, channel)
+		return cardInfoLoaded{userID: userID, info: info, err: err != nil}
 	}
 }
 
@@ -193,6 +236,68 @@ func (m *Model) perform(action string) tea.Cmd {
 	return nil
 }
 
+// renderCardInfo renders the account/subscription block. It reflects the async
+// load's state: no provider, still loading, failed, or loaded.
+func (m *Model) renderCardInfo() string {
+	s := m.styles
+	c := m.card
+
+	if m.info == nil {
+		return s.dim.Render("account detail: log in to load")
+	}
+	if c.info == nil && !c.infoErr {
+		return s.dim.Render("account detail: loading…")
+	}
+	if c.infoErr {
+		return s.dim.Render("account detail: unavailable")
+	}
+
+	var lines []string
+	if !c.info.CreatedAt.IsZero() {
+		age := yearsSince(c.info.CreatedAt)
+		lines = append(lines, s.cardLabel.Render("created ")+
+			c.info.CreatedAt.Format("Jan 2, 2006")+s.dim.Render(age))
+	}
+	if c.info.FollowedAt != nil {
+		lines = append(lines, s.cardLabel.Render("followed ")+
+			c.info.FollowedAt.Format("Jan 2, 2006"))
+	}
+	switch {
+	case c.info.SubHidden:
+		lines = append(lines, s.cardLabel.Render("sub ")+s.dim.Render("hidden"))
+	case c.info.SubTier != "":
+		lines = append(lines, s.cardLabel.Render("sub ")+
+			fmt.Sprintf("Tier %s · %d months", tierLabel(c.info.SubTier), c.info.SubMonths))
+	default:
+		lines = append(lines, s.cardLabel.Render("sub ")+s.dim.Render("not subscribed"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// tierLabel turns Twitch's "1000"/"2000"/"3000" or "1"/"2"/"3" tier codes into
+// a plain tier number. IVR returns the short form, but guard the long one too.
+func tierLabel(tier string) string {
+	switch tier {
+	case "1000":
+		return "1"
+	case "2000":
+		return "2"
+	case "3000":
+		return "3"
+	default:
+		return tier
+	}
+}
+
+// yearsSince renders a compact " (Ny)" age suffix, empty for under a year.
+func yearsSince(t time.Time) string {
+	years := int(time.Since(t).Hours() / 24 / 365)
+	if years < 1 {
+		return ""
+	}
+	return fmt.Sprintf(" (%dy)", years)
+}
+
 // renderCard draws the card panel and joins it beside the chat body.
 func (m *Model) renderCard(body string) string {
 	s := m.styles
@@ -212,10 +317,15 @@ func (m *Model) renderCard(body string) string {
 		// the login is what actually identifies them.
 		b.WriteString(s.cardLabel.Render("@"+c.login) + "\n")
 	}
-	b.WriteString(s.cardLabel.Render(fmt.Sprintf("id %s · %d msgs held", c.userID, len(history))) + "\n\n")
+	b.WriteString(s.cardLabel.Render("id "+c.userID) + "\n")
 
-	// Their recent messages.
-	b.WriteString(s.cardLabel.Render("recent") + "\n")
+	// Account / subscription detail, the top of Twitch's own mod card. Loads
+	// asynchronously, so show its state.
+	b.WriteString(m.renderCardInfo() + "\n")
+
+	// Their recent messages (from the local buffer; see renderCardInfo for why
+	// there is no all-time history).
+	b.WriteString(s.cardLabel.Render(fmt.Sprintf("recent (%d held)", len(history))) + "\n")
 	if len(history) == 0 {
 		b.WriteString(s.dim.Render("  (nothing in buffer)") + "\n")
 	}

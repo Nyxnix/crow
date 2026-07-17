@@ -19,6 +19,7 @@ import (
 	"github.com/Nyxnix/typetype/internal/badge"
 	"github.com/Nyxnix/typetype/internal/chat"
 	"github.com/Nyxnix/typetype/internal/emote"
+	"github.com/Nyxnix/typetype/internal/ivr"
 	"github.com/Nyxnix/typetype/internal/overlay"
 	"github.com/Nyxnix/typetype/internal/tui"
 	"github.com/Nyxnix/typetype/internal/twitch"
@@ -190,12 +191,29 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 		Emotes:   emotes,
 		Clients:  ov.Clients,
 		Mod:      mod,
+		Info:     infoProvider{&ivr.Client{}},
 		Send:     sendFn,
 	})
 
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
 	_, err = p.Run()
 	return err
+}
+
+// infoProvider adapts the IVR client to the TUI's InfoProvider interface,
+// translating ivr.CardInfo into the card's UserInfo. This keeps the tui package
+// from importing ivr.
+type infoProvider struct{ c *ivr.Client }
+
+func (p infoProvider) CardInfo(ctx context.Context, userLogin, channel string) (tui.UserInfo, error) {
+	i, err := p.c.CardInfo(ctx, userLogin, channel)
+	return tui.UserInfo{
+		CreatedAt:  i.CreatedAt,
+		FollowedAt: i.FollowedAt,
+		SubTier:    i.SubTier,
+		SubMonths:  i.SubMonths,
+		SubHidden:  i.SubHidden,
+	}, err
 }
 
 // loadSession returns the stored login, refreshing it if needed, or nil when

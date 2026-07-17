@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -192,6 +193,116 @@ func TestCardLayoutFitsAndIsStable(t *testing.T) {
 	if shortCol != longCol {
 		t.Errorf("card sits at column %d with short messages but %d with long ones; it must not drift",
 			shortCol, longCol)
+	}
+}
+
+// --- card info section -----------------------------------------------------
+
+type fakeInfo struct {
+	info UserInfo
+	err  error
+	got  struct{ login, channel string }
+}
+
+func (f *fakeInfo) CardInfo(_ context.Context, login, channel string) (UserInfo, error) {
+	f.got.login, f.got.channel = login, channel
+	return f.info, f.err
+}
+
+func openCardWithInfo(t *testing.T, f *fakeInfo) *Model {
+	t.Helper()
+	m := NewModel(Options{Channel: "buh", Incoming: make(chan chat.Message), Info: f})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.append(chat.Message{ID: "m", AuthorID: "42", Author: "alice", AuthorLogin: "alice", Text: "hi"})
+	m.View()
+	_, cmd := m.Update(tea.MouseMsg{X: 7, Y: 0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if m.card == nil {
+		t.Fatal("card did not open")
+	}
+	if cmd == nil {
+		t.Fatal("clicking a name with an info provider produced no fetch command")
+	}
+	m.Update(cmd()) // run the fetch and apply the result
+	return m
+}
+
+func TestCardFetchesInfoForClickedUser(t *testing.T) {
+	f := &fakeInfo{info: UserInfo{SubTier: "3", SubMonths: 78}}
+	openCardWithInfo(t, f)
+	if f.got.login != "alice" || f.got.channel != "buh" {
+		t.Errorf("fetched for %q in %q, want alice in buh", f.got.login, f.got.channel)
+	}
+}
+
+func TestCardShowsSubInfo(t *testing.T) {
+	created := time.Date(2018, 7, 20, 0, 0, 0, 0, time.UTC)
+	f := &fakeInfo{info: UserInfo{CreatedAt: created, SubTier: "3", SubMonths: 78}}
+	m := openCardWithInfo(t, f)
+
+	view := m.View()
+	if !strings.Contains(view, "Tier 3") || !strings.Contains(view, "78 months") {
+		t.Errorf("card missing sub info:\n%s", view)
+	}
+	if !strings.Contains(view, "2018") {
+		t.Errorf("card missing account-created year:\n%s", view)
+	}
+}
+
+func TestCardShowsNotSubscribed(t *testing.T) {
+	f := &fakeInfo{info: UserInfo{CreatedAt: time.Now(), SubTier: ""}}
+	m := openCardWithInfo(t, f)
+	if !strings.Contains(m.View(), "not subscribed") {
+		t.Errorf("card should say not subscribed:\n%s", m.View())
+	}
+}
+
+func TestCardHandlesHiddenSub(t *testing.T) {
+	f := &fakeInfo{info: UserInfo{CreatedAt: time.Now(), SubHidden: true}}
+	m := openCardWithInfo(t, f)
+	if !strings.Contains(m.View(), "hidden") {
+		t.Errorf("card should mark sub hidden:\n%s", m.View())
+	}
+}
+
+func TestCardShowsInfoError(t *testing.T) {
+	f := &fakeInfo{err: errors.New("ivr down")}
+	m := openCardWithInfo(t, f)
+	if !strings.Contains(m.View(), "unavailable") {
+		t.Errorf("card should mark info unavailable on error:\n%s", m.View())
+	}
+}
+
+// A stale response for a card that was closed or reopened for someone else must
+// be ignored.
+func TestStaleCardInfoIgnored(t *testing.T) {
+	m := newTestModel(t, 100, 20,
+		chat.Message{AuthorID: "1", Author: "alice", AuthorLogin: "alice", Text: "hi"})
+	m.info = &fakeInfo{}
+	click(m, 7, 0)
+	if m.card == nil {
+		t.Fatal("no card")
+	}
+	// A response for a different user than the open card must not apply.
+	m.Update(cardInfoLoaded{userID: "999", info: UserInfo{SubTier: "1"}})
+	if m.card.info != nil {
+		t.Error("applied info meant for a different user")
+	}
+}
+
+// Without an info provider (e.g. anonymous), the card opens with no fetch and
+// says so instead of hanging on "loading".
+func TestCardWithoutProvider(t *testing.T) {
+	m := newTestModel(t, 100, 20,
+		chat.Message{AuthorID: "1", Author: "alice", AuthorLogin: "alice", Text: "hi"})
+	_, cmd := m.Update(tea.MouseMsg{X: 7, Y: 0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if m.card == nil {
+		t.Fatal("no card")
+	}
+	if cmd != nil {
+		t.Error("no info provider, but a fetch was issued")
+	}
+	if !strings.Contains(m.View(), "log in to load") {
+		t.Errorf("card should prompt to log in:\n%s", m.View())
 	}
 }
 

@@ -48,6 +48,7 @@ type Model struct {
 
 	emotes  *emote.Registry
 	mod     Moderator
+	info    InfoProvider
 	clients func() int // connected overlay browser sources
 
 	// send delivers a typed message to Twitch. Nil when not logged in, which is
@@ -64,6 +65,7 @@ type Options struct {
 	Incoming <-chan chat.Message
 	Emotes   *emote.Registry
 	Mod      Moderator
+	Info     InfoProvider
 	Clients  func() int
 
 	// Send delivers a typed message. Leave nil for a read-only (not logged in)
@@ -87,6 +89,7 @@ func NewModel(o Options) *Model {
 		styles:   newStyles(),
 		emotes:   o.Emotes,
 		mod:      o.Mod,
+		info:     o.Info,
 		clients:  o.Clients,
 		send:     o.Send,
 		input:    ti,
@@ -144,6 +147,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.card != nil {
 			m.card.status = msg.text
 			m.card.statusErr = msg.err
+		}
+		return m, nil
+
+	case cardInfoLoaded:
+		// Ignore a response for a card that was closed or reopened for someone
+		// else while the fetch was in flight.
+		if m.card != nil && m.card.userID == msg.userID {
+			m.card.info = &msg.info
+			m.card.infoErr = msg.err
 		}
 		return m, nil
 	}
@@ -255,7 +267,7 @@ func (m *Model) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if h := m.hitAt(msg.X, msg.Y); h != nil {
-		m.openCard(h.msg)
+		return m, m.openCard(h.msg)
 	}
 	return m, nil
 }
