@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"sync"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -175,17 +174,11 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 	if session != nil {
 		sendFn = func(text string) {
 			tw.Send(text)
-			echo := chat.Message{
-				Platform:    chat.Twitch,
-				Channel:     channel,
-				AuthorID:    session.UserID,
-				Author:      session.Login,
-				AuthorLogin: session.Login,
-				Text:        text,
-				At:          time.Now(),
-			}
+			// Echo carries the user's real badges/color/display name from
+			// USERSTATE, so a sent message looks the same locally as it does to
+			// everyone else. Badges get their image URLs in the fan-out below.
 			select {
-			case echoCh <- echo:
+			case echoCh <- tw.Echo(text, session.UserID, session.Login):
 			default:
 			}
 		}

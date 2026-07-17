@@ -48,6 +48,53 @@ type Client struct {
 	// addr overrides the Twitch IRC endpoint. Empty means the real one; tests
 	// point it at a local stand-in server.
 	addr string
+
+	// self holds the logged-in user's own presentation (badges, color, display
+	// name) as reported by USERSTATE. Twitch does not echo our own PRIVMSGs, so
+	// this is what lets a locally-injected echo look like the real thing.
+	selfMu sync.RWMutex
+	self   Self
+}
+
+// Self is the logged-in user's own chat presentation in the current channel.
+type Self struct {
+	DisplayName string
+	Color       string
+	Badges      []chat.Badge
+}
+
+// Self returns the user's own presentation from the latest USERSTATE. It is
+// empty until the first one arrives, shortly after joining.
+func (c *Client) Self() Self {
+	c.selfMu.RLock()
+	defer c.selfMu.RUnlock()
+	return c.self
+}
+
+// Echo builds a chat.Message for a message the user just sent, so it can be
+// shown locally: Twitch never sends our own PRIVMSGs back. It uses the latest
+// USERSTATE so the echo carries the same badges, color and display name the
+// message will show to everyone else. Falls back to login before USERSTATE has
+// arrived.
+func (c *Client) Echo(text, userID, login string) chat.Message {
+	s := c.Self()
+	author := s.DisplayName
+	if author == "" {
+		author = login
+	}
+	m := chat.Message{
+		Platform:    chat.Twitch,
+		Channel:     c.Channel,
+		AuthorID:    userID,
+		Author:      author,
+		AuthorLogin: login,
+		Color:       s.Color,
+		Text:        text,
+		Badges:      s.Badges,
+		At:          time.Now(),
+	}
+	applyBadgeRoles(&m)
+	return m
 }
 
 // serverAddr returns the endpoint to dial.
@@ -198,6 +245,16 @@ func (c *Client) session(ctx context.Context) error {
 			if id := line.tags["room-id"]; id != "" && c.OnRoomID != nil {
 				c.OnRoomID(id)
 			}
+		case "USERSTATE":
+			// Twitch sends this on join and after each of our messages, carrying
+			// our own badges, color and display name for this channel.
+			c.selfMu.Lock()
+			c.self = Self{
+				DisplayName: line.tags["display-name"],
+				Color:       line.tags["color"],
+				Badges:      parseBadges(line.tags["badges"]),
+			}
+			c.selfMu.Unlock()
 		case "PRIVMSG":
 			msg, ok := toMessage(line)
 			if !ok {
@@ -352,7 +409,15 @@ func toMessage(l ircLine) (chat.Message, bool) {
 		Badges:      badges,
 		At:          tagTime(l.tags["tmi-sent-ts"]),
 	}
-	for _, b := range badges {
+	applyBadgeRoles(&m)
+	return m, true
+}
+
+// applyBadgeRoles sets the role flags from a message's badges, so display and
+// mod-action decisions read one place. Shared by PRIVMSG and the self-state
+// built from USERSTATE.
+func applyBadgeRoles(m *chat.Message) {
+	for _, b := range m.Badges {
 		switch b.Name {
 		case "broadcaster":
 			m.Broadcaster = true
@@ -364,7 +429,6 @@ func toMessage(l ircLine) (chat.Message, bool) {
 			m.Subscriber = true
 		}
 	}
-	return m, true
 }
 
 // parseBadges reads the badges tag: "broadcaster/1,subscriber/12".
