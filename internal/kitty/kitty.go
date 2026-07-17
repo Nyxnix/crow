@@ -60,9 +60,10 @@ type entry struct {
 	cols        int      // display width in cells (height is one row)
 	frames      [][]byte // PNG bytes per frame
 	delays      []int    // per-frame display time in ms
-	ready       bool     // fetched and decoded
-	failed      bool     // fetch/decode failed; do not retry
-	transmitted bool     // upload escape has been emitted to the terminal
+	ready       bool      // fetched and decoded
+	failed      bool      // fetch/decode failed; do not retry
+	readyAt     time.Time // when ready flipped true, for the re-emit window
+	transmitted bool      // upload settled: emitted long enough to be flushed
 }
 
 // Cache fetches, decodes and remembers images by URL. It is safe for concurrent
@@ -124,18 +125,28 @@ func (c *Cache) Render(url string) (s string, cols int, ok bool) {
 	return b.String(), cols, true
 }
 
-// FlushUploads returns the upload sequences for every image that has become
-// ready since the last call, marking them uploaded. Emit the result once at the
-// start of a frame, before any placeholder cells. It is empty when nothing new
-// has loaded.
+// uploadWindow is how long an upload keeps being re-emitted after its image
+// loads. Bubbletea renders on a ~16ms ticker and discards all but the last
+// View() built within a tick, so an upload emitted in a discarded frame would
+// be lost if we marked it sent immediately. Re-emitting for a window many ticks
+// wide means every candidate frame carries it, so whichever the ticker flushes
+// has it — then we stop, so a heavy animation uploads only a handful of times.
+const uploadWindow = 200 * time.Millisecond
+
+// FlushUploads returns the upload sequences for every image that has loaded but
+// not yet settled. Emit the result once at the start of a frame, before any
+// placeholder cells. It is empty when nothing is pending.
 func (c *Cache) FlushUploads() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var b strings.Builder
 	for _, e := range c.byURL {
-		if e.ready && !e.transmitted {
-			writeUpload(&b, e)
-			e.transmitted = true
+		if !e.ready || e.transmitted {
+			continue
+		}
+		writeUpload(&b, e)
+		if time.Since(e.readyAt) > uploadWindow {
+			e.transmitted = true // settled: a flush has certainly carried it
 		}
 	}
 	return b.String()
@@ -162,7 +173,7 @@ func (c *Cache) load(url string, e *entry) {
 	if err != nil {
 		e.failed = true
 	} else {
-		e.frames, e.delays, e.cols, e.ready = d.frames, d.delays, d.cols, true
+		e.frames, e.delays, e.cols, e.ready, e.readyAt = d.frames, d.delays, d.cols, true, time.Now()
 	}
 	c.mu.Unlock()
 

@@ -81,9 +81,10 @@ func TestRenderLoadsAndEmitsGraphics(t *testing.T) {
 	}
 }
 
-// Uploads are flushed once: the first flush after an image loads carries the
-// data, later flushes do not, so a frame never re-uploads a badge.
-func TestFlushUploadsOnce(t *testing.T) {
+// An upload is re-emitted during its settle window (bubbletea can discard the
+// frame that first carried it), then stops once the window passes so a heavy
+// animation doesn't re-upload forever.
+func TestFlushUploadsReEmitsThenSettles(t *testing.T) {
 	srv := pngServer(t, 72, 72)
 	defer srv.Close()
 	c := New(nil)
@@ -96,12 +97,21 @@ func TestFlushUploadsOnce(t *testing.T) {
 
 	waitReady(t, c, srv.URL)
 
-	first := c.FlushUploads()
-	if !strings.Contains(first, "\x1b_Ga=T") {
+	// Within the window, every flush carries the upload.
+	if first := c.FlushUploads(); !strings.Contains(first, "\x1b_Ga=T") {
 		t.Error("first flush after load should carry the upload")
 	}
-	if second := c.FlushUploads(); second != "" {
-		t.Errorf("second flush = %q, want empty (already uploaded)", second)
+	if second := c.FlushUploads(); !strings.Contains(second, "\x1b_Ga=T") {
+		t.Error("flush within the settle window should re-emit the upload")
+	}
+
+	// After the window, it settles and stops re-emitting.
+	time.Sleep(uploadWindow + 20*time.Millisecond)
+	if settling := c.FlushUploads(); !strings.Contains(settling, "\x1b_Ga=T") {
+		t.Error("the flush past the window should carry one last upload")
+	}
+	if done := c.FlushUploads(); done != "" {
+		t.Errorf("after settling, flush = %q, want empty", done)
 	}
 }
 
