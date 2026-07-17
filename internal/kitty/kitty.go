@@ -194,8 +194,13 @@ func (c *Cache) FlushUploads() string {
 			continue
 		}
 		writeUpload(&b, e)
-		if time.Since(e.readyAt) > uploadWindow {
-			e.transmitted = true // settled: a flush has certainly carried it
+		// An animated upload must be emitted exactly once: re-sending its a=T root
+		// wipes the composed frames and re-sending a=f frames appends duplicates,
+		// so re-emitting corrupts the animation. Only a single-frame (static) image
+		// is safe to re-emit across the settle window that protects it from a
+		// discarded frame during a message burst.
+		if len(e.frames) > 1 || time.Since(e.readyAt) > uploadWindow {
+			e.transmitted = true
 		}
 	}
 	return b.String()

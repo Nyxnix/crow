@@ -115,6 +115,29 @@ func TestFlushUploadsReEmitsThenSettles(t *testing.T) {
 	}
 }
 
+// An animated (multi-frame) upload is emitted exactly once and never re-emitted:
+// re-sending its frames would corrupt the animation.
+func TestAnimatedUploadEmittedOnce(t *testing.T) {
+	c := New(nil)
+	c.mu.Lock()
+	c.byURL["anim"] = &entry{
+		id:      1,
+		cols:    2,
+		frames:  [][]byte{[]byte("f0"), []byte("f1"), []byte("f2")},
+		delays:  []int{40, 40, 40},
+		ready:   true,
+		readyAt: time.Now(),
+	}
+	c.mu.Unlock()
+
+	if first := c.FlushUploads(); !strings.Contains(first, "\x1b_Ga=T") {
+		t.Error("first flush should carry the animated upload")
+	}
+	if second := c.FlushUploads(); second != "" {
+		t.Errorf("animated upload re-emitted (%q); it must settle after one flush", second)
+	}
+}
+
 // A wide image gets more cells than a square one, preserving aspect.
 func TestCellsWideByAspect(t *testing.T) {
 	if got := cellsWide(72, 72); got != 2 {
