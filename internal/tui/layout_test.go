@@ -223,9 +223,27 @@ func TestPackTokens(t *testing.T) {
 		{str: "aaa", w: 3}, {str: "bbb", w: 3}, {str: "ccc", w: 3},
 	}
 	// Width 7 fits "aaa bbb" (7) then "ccc".
-	lines := packTokens(toks, 7, 7)
+	lines, _ := packTokens(toks, 7, 7)
 	if len(lines) != 2 || lines[0] != "aaa bbb" || lines[1] != "ccc" {
 		t.Errorf("got %q, want [aaa bbb, ccc]", lines)
+	}
+}
+
+// packTokens reports where each emote token landed so clicks can hit it. The
+// span columns must use the declared cell width, not the escape's rune length.
+func TestPackTokensReportsEmoteSpans(t *testing.T) {
+	e := &chat.Emote{Name: "PogU"}
+	toks := []renderedToken{
+		{str: "word", w: 4},
+		{str: "\x1bIMG\x1b", w: 2, emote: e},
+	}
+	lines, spans := packTokens(toks, 40, 40)
+	if len(lines) != 1 || len(spans) != 1 || len(spans[0]) != 1 {
+		t.Fatalf("got %d lines / spans %v, want one line with one span", len(lines), spans)
+	}
+	// "word" (4) + space (1) puts the emote at columns [5, 7).
+	if got := spans[0][0]; got.x0 != 5 || got.x1 != 7 || got.emote != e {
+		t.Errorf("span = %+v, want x0=5 x1=7 for the emote", got)
 	}
 }
 
@@ -239,7 +257,7 @@ func TestPackTokensUsesDeclaredWidth(t *testing.T) {
 	}
 	// Budget 6: "word" (4) + emote (2) = 6 fits with a space? 4+1+2=7 > 6, so
 	// the emote wraps. Then emote(2)+space+next(4)=7 > 6, next wraps too.
-	lines := packTokens(toks, 6, 6)
+	lines, _ := packTokens(toks, 6, 6)
 	if len(lines) != 3 {
 		t.Fatalf("got %d lines, want 3 (declared widths respected): %q", len(lines), lines)
 	}
@@ -253,7 +271,7 @@ func TestLayoutBodyEmotesFallsBackToName(t *testing.T) {
 		Text:   "gg Kappa",
 		Emotes: []chat.Emote{{Name: "Kappa", URL: "https://cdn/never-loads", Start: 3, End: 8}},
 	}
-	lines := layoutBodyEmotes(m, 40, 40, newStyles(), gfx)
+	lines, _ := layoutBodyEmotes(m, 40, 40, newStyles(), gfx)
 	joined := strings.Join(lines, " ")
 	if !strings.Contains(joined, "Kappa") {
 		t.Errorf("unloaded emote not shown as its name: %q", lines)

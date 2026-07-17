@@ -18,11 +18,13 @@ const (
 // Go's usual slice convention. Twitch reports its own emotes as inclusive
 // ranges; the parser converts them on the way in.
 type Emote struct {
-	Name  string
-	ID    string
-	URL   string // highest quality the provider offers
-	Start int
-	End   int
+	Name     string
+	ID       string
+	URL      string // highest quality the provider offers
+	Provider string // "7tv"/"bttv"/"ffz"/"twitch", for the emote card
+	Owner    string // who made it, for the emote card; "" if unknown
+	Start    int
+	End      int
 
 	// ZeroWidth marks a 7TV overlay emote, which is drawn on top of the emote
 	// before it rather than taking its own space. Rendered inline it would look

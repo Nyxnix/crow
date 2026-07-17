@@ -57,13 +57,22 @@ func Supported() bool {
 // frame; a static one has exactly one.
 type entry struct {
 	id          uint32
-	cols        int      // display width in cells (height is one row)
+	rows        int      // placement height in cells; 0 means inline (one row)
+	cols        int      // placement width in cells
 	frames      [][]byte // PNG bytes per frame
 	delays      []int    // per-frame display time in ms
 	ready       bool      // fetched and decoded
 	failed      bool      // fetch/decode failed; do not retry
 	readyAt     time.Time // when ready flipped true, for the re-emit window
 	transmitted bool      // upload settled: emitted long enough to be flushed
+}
+
+// placeRows is the placement height, treating the inline default (0) as 1.
+func (e *entry) placeRows() int {
+	if e.rows < 1 {
+		return 1
+	}
+	return e.rows
 }
 
 // Cache fetches, decodes and remembers images by URL. It is safe for concurrent
@@ -121,8 +130,44 @@ func (c *Cache) Render(url string) (s string, cols int, ok bool) {
 	c.mu.Unlock()
 
 	var b strings.Builder
-	writePlaceholders(&b, id, cols)
+	writePlaceholders(&b, id, 0, cols)
 	return b.String(), cols, true
+}
+
+// RenderLarge is Render at rows cells tall: it returns one placeholder string
+// per row (to place on successive screen lines) and the width in cols. It keeps
+// a separate cache entry per (url, rows) so the inline copy is untouched, at the
+// cost of a second upload — acceptable since it only happens when a card opens.
+func (c *Cache) RenderLarge(url string, rows int) (lines []string, cols int, ok bool) {
+	if rows < 1 {
+		rows = 1
+	}
+	key := fmt.Sprintf("%s#%d", url, rows)
+
+	c.mu.Lock()
+	e := c.byURL[key]
+	if e == nil {
+		e = &entry{id: c.nextID, rows: rows}
+		c.nextID++
+		c.byURL[key] = e
+		c.mu.Unlock()
+		go c.load(url, e)
+		return nil, 0, false
+	}
+	if !e.ready {
+		c.mu.Unlock()
+		return nil, 0, false
+	}
+	id, cols := e.id, e.cols
+	c.mu.Unlock()
+
+	lines = make([]string, rows)
+	for row := 0; row < rows; row++ {
+		var b strings.Builder
+		writePlaceholders(&b, id, row, cols)
+		lines[row] = b.String()
+	}
+	return lines, cols, true
 }
 
 // uploadWindow is how long an upload keeps being re-emitted after its image
@@ -132,6 +177,10 @@ func (c *Cache) Render(url string) (s string, cols int, ok bool) {
 // wide means every candidate frame carries it, so whichever the ticker flushes
 // has it — then we stop, so a heavy animation uploads only a handful of times.
 const uploadWindow = 200 * time.Millisecond
+
+// maxLargeCols caps a large placement's width so a wide emote fits the emote
+// card and stays within the diacritic table used to encode cell columns.
+const maxLargeCols = 40
 
 // FlushUploads returns the upload sequences for every image that has loaded but
 // not yet settled. Emit the result once at the start of a frame, before any
@@ -173,7 +222,14 @@ func (c *Cache) load(url string, e *entry) {
 	if err != nil {
 		e.failed = true
 	} else {
-		e.frames, e.delays, e.cols, e.ready, e.readyAt = d.frames, d.delays, d.cols, true, time.Now()
+		cols := d.cols // one-row width
+		if e.rows > 1 {
+			cols = colsForRows(d.w, d.h, e.rows)
+			if cols > maxLargeCols {
+				cols = maxLargeCols // fit the card; the placement scales to match
+			}
+		}
+		e.frames, e.delays, e.cols, e.ready, e.readyAt = d.frames, d.delays, cols, true, time.Now()
 	}
 	c.mu.Unlock()
 
@@ -183,11 +239,13 @@ func (c *Cache) load(url string, e *entry) {
 }
 
 // decoded is the result of fetching an image: one PNG frame for a static image,
-// several for an animated one, with per-frame delays and the display width.
+// several for an animated one, with per-frame delays and the natural pixel size
+// (from which a display width in cells is derived per placement).
 type decoded struct {
 	frames [][]byte
 	delays []int
-	cols   int
+	cols   int // display width at one row tall
+	w, h   int // natural pixel dimensions
 }
 
 // fetch downloads and decodes an image. GIFs decode to all their frames;
@@ -225,7 +283,8 @@ func (c *Cache) fetch(url string) (decoded, error) {
 	if err := png.Encode(&buf, img); err != nil {
 		return decoded{}, err
 	}
-	return decoded{frames: [][]byte{buf.Bytes()}, delays: []int{0}, cols: cellsWide(img.Bounds().Dx(), img.Bounds().Dy())}, nil
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	return decoded{frames: [][]byte{buf.Bytes()}, delays: []int{0}, cols: cellsWide(w, h), w: w, h: h}, nil
 }
 
 // AnimatedURL maps a WebP emote URL to the small GIF the TUI animates. Callers
@@ -270,7 +329,7 @@ func decodeGIF(raw []byte) (decoded, error) {
 	}
 	canvas := image.NewRGBA(bounds)
 
-	out := decoded{cols: cellsWide(bounds.Dx(), bounds.Dy())}
+	out := decoded{cols: cellsWide(bounds.Dx(), bounds.Dy()), w: bounds.Dx(), h: bounds.Dy()}
 	for i, frame := range g.Image {
 		var saved *image.RGBA
 		if g.Disposal[i] == gif.DisposalPrevious {
@@ -319,7 +378,7 @@ func subsample(d decoded, max int) decoded {
 	if n <= max {
 		return d
 	}
-	out := decoded{cols: d.cols, frames: make([][]byte, 0, max), delays: make([]int, 0, max)}
+	out := decoded{cols: d.cols, w: d.w, h: d.h, frames: make([][]byte, 0, max), delays: make([]int, 0, max)}
 	prev := 0
 	for k := 0; k < max; k++ {
 		idx := k * n / max
@@ -343,19 +402,25 @@ func cloneRGBA(src *image.RGBA) *image.RGBA {
 }
 
 // cellsWide picks a cell width that preserves the image's aspect ratio at a
-// height of one row. A terminal cell is about twice as tall as it is wide, so a
-// square image (badge) needs ~2 cells to look square; the result is clamped so
-// one image never dominates a line.
+// height of one row, clamped so one inline image never dominates a line.
 func cellsWide(w, h int) int {
-	if h <= 0 {
-		return 2
+	cols := colsForRows(w, h, 1)
+	if cols > 6 {
+		cols = 6 // inline clamp; large placements (the emote card) are unclamped
 	}
-	cols := int(float64(w)/float64(h)*2 + 0.5)
+	return cols
+}
+
+// colsForRows is the aspect-correct cell width for an image displayed rows cells
+// tall. A terminal cell is about twice as tall as it is wide, so a square image
+// at one row is ~2 cells; at R rows it is ~2R cells.
+func colsForRows(w, h, rows int) int {
+	if h <= 0 {
+		return 2 * rows
+	}
+	cols := int(float64(w)/float64(h)*2*float64(rows) + 0.5)
 	if cols < 1 {
 		cols = 1
-	}
-	if cols > 6 {
-		cols = 6
 	}
 	return cols
 }
@@ -367,7 +432,7 @@ func cellsWide(w, h int) int {
 // first frame, so this degrades to a static image.
 func writeUpload(b *strings.Builder, e *entry) {
 	// Root frame with the placement (continuations of an upload need only m=).
-	writeChunked(b, fmt.Sprintf("a=T,U=1,i=%d,f=100,c=%d,r=1,q=2", e.id, e.cols), "", e.frames[0])
+	writeChunked(b, fmt.Sprintf("a=T,U=1,i=%d,f=100,c=%d,r=%d,q=2", e.id, e.cols, e.placeRows()), "", e.frames[0])
 
 	if len(e.frames) <= 1 {
 		return
@@ -416,15 +481,16 @@ func writeChunked(b *strings.Builder, firstControl, contControl string, payload 
 	}
 }
 
-// writePlaceholders emits the row of placeholder cells that display image id.
-// The id is carried in the foreground color; each cell names its column via a
-// combining diacritic so the terminal reconstructs the image left to right.
-func writePlaceholders(b *strings.Builder, id uint32, cols int) {
+// writePlaceholders emits one row of placeholder cells that display image id.
+// The id is carried in the foreground color; each cell names its row and column
+// via combining diacritics so the terminal reconstructs the image. A one-row
+// image passes row 0; a tall placement emits this once per row.
+func writePlaceholders(b *strings.Builder, id uint32, row, cols int) {
 	// Foreground color carries the 24-bit image id.
 	fmt.Fprintf(b, "\x1b[38;2;%d;%d;%dm", (id>>16)&0xff, (id>>8)&0xff, id&0xff)
 	for col := 0; col < cols; col++ {
 		b.WriteString(placeholder)
-		b.WriteString(diacritic(0)) // row 0
+		b.WriteString(diacritic(row))
 		b.WriteString(diacritic(col))
 	}
 	b.WriteString("\x1b[39m")
@@ -440,7 +506,16 @@ func diacritic(n int) string {
 	return string(diacritics[n])
 }
 
+// diacritics is the head of kitty's row/column encoding table (protocol order).
+// Enough entries to cover a full-width large placement; inline images use only
+// the first few.
 var diacritics = []rune{
 	0x0305, 0x030D, 0x030E, 0x0310, 0x0312, 0x033D, 0x033E, 0x033F,
 	0x0346, 0x034A, 0x034B, 0x034C, 0x0350, 0x0351, 0x0352, 0x0357,
+	0x035B, 0x0363, 0x0364, 0x0365, 0x0366, 0x0367, 0x0368, 0x0369,
+	0x036A, 0x036B, 0x036C, 0x036D, 0x036E, 0x036F, 0x0483, 0x0484,
+	0x0485, 0x0486, 0x0487, 0x0592, 0x0593, 0x0594, 0x0595, 0x0597,
+	0x0598, 0x0599, 0x059C, 0x059D, 0x059E, 0x059F, 0x05A0, 0x05A1,
+	0x05A8, 0x05A9, 0x05AB, 0x05AC, 0x05AF, 0x05C4, 0x0610, 0x0611,
+	0x0612, 0x0613, 0x0614, 0x0615, 0x0616, 0x0617, 0x0657, 0x0658,
 }

@@ -46,8 +46,10 @@ type Model struct {
 	// means following live chat.
 	scroll int
 
-	hits []hit
-	card *card
+	hits      []hit
+	emoteHits []ehit
+	card      *card
+	emoteCard *emoteCard
 
 	// lastRender is the message snapshot the current hit boxes index into, so a
 	// click maps to the right message regardless of buffer changes since render.
@@ -242,6 +244,11 @@ func (m *Model) snapshot() []chat.Message {
 }
 
 func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The emote card is a passive popup: any key dismisses it.
+	if m.emoteCard != nil {
+		m.emoteCard = nil
+		return m, nil
+	}
 	// The card owns the keyboard while it's open.
 	if m.card != nil {
 		return m.cardKey(msg)
@@ -316,16 +323,35 @@ func (m *Model) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
-	// A click anywhere while the card is open dismisses it, matching how the
+	// A click anywhere while a popup is open dismisses it, matching how the
 	// same overlay behaves on Twitch itself.
+	if m.emoteCard != nil {
+		m.emoteCard = nil
+		return m, nil
+	}
 	if m.card != nil {
 		m.card = nil
+		return m, nil
+	}
+	if e := m.emoteHitAt(msg.X, msg.Y); e != nil {
+		m.emoteCard = &emoteCard{emote: e.emote}
 		return m, nil
 	}
 	if h := m.hitAt(msg.X, msg.Y); h != nil {
 		return m, m.openCard(h.msg)
 	}
 	return m, nil
+}
+
+// emoteHitAt finds the emote, if any, under a click.
+func (m *Model) emoteHitAt(x, y int) *ehit {
+	for i := range m.emoteHits {
+		e := m.emoteHits[i]
+		if e.row == y && x >= e.x0 && x < e.x1 {
+			return &m.emoteHits[i]
+		}
+	}
+	return nil
 }
 
 // hitAt finds the username, if any, under a click.
@@ -363,7 +389,7 @@ func (m *Model) viewportHeight() int {
 // chatWidth is the width available to message text, which shrinks when the card
 // takes the right-hand column.
 func (m *Model) chatWidth() int {
-	if m.card == nil {
+	if m.card == nil && m.emoteCard == nil {
 		return m.width
 	}
 	w := m.width - cardOuterWidth - cardGutter
@@ -413,12 +439,17 @@ func (m *Model) View() string {
 	// Hits are recorded against absolute line numbers; the click handler works
 	// in screen rows, so rebase them and drop those scrolled out of view.
 	m.hits = m.hits[:0]
+	m.emoteHits = m.emoteHits[:0]
 	rows := make([]string, 0, vh)
 	for i, l := range window {
 		if l.hit != nil {
 			h := *l.hit
 			h.row = i
 			m.hits = append(m.hits, h)
+		}
+		for _, e := range l.emotes {
+			e.row = i
+			m.emoteHits = append(m.emoteHits, e)
 		}
 		rows = append(rows, l.text)
 	}
@@ -428,8 +459,11 @@ func (m *Model) View() string {
 	}
 
 	body := strings.Join(rows, "\n")
-	if m.card != nil {
+	switch {
+	case m.card != nil:
 		body = m.renderCard(body)
+	case m.emoteCard != nil:
+		body = m.renderEmoteCard(body)
 	}
 
 	out := body

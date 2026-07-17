@@ -35,6 +35,7 @@ type Emote struct {
 	ID        string
 	URL       string
 	Provider  Provider
+	Owner     string // who made/uploaded it, for the emote card; "" if unknown
 	ZeroWidth bool
 	Animated  bool // the provider marks it animated, so the TUI can fetch its GIF directly
 }
@@ -180,6 +181,8 @@ func (r *Registry) Apply(m *chat.Message) {
 					Name:      e.Name,
 					ID:        e.ID,
 					URL:       e.URL,
+					Provider:  string(e.Provider),
+					Owner:     e.Owner,
 					Start:     i,
 					End:       j,
 					ZeroWidth: e.ZeroWidth,
@@ -247,6 +250,10 @@ type sevenTVData struct {
 	Flags    int         `json:"flags"`
 	Animated bool        `json:"animated"`
 	Host     sevenTVHost `json:"host"`
+	Owner    struct {
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+	} `json:"owner"`
 }
 
 type sevenTVEmote struct {
@@ -267,11 +274,16 @@ func (s sevenTVSet) toEmotes() []Emote {
 			continue
 		}
 		// host.url is protocol-relative ("//cdn.7tv.app/emote/<id>").
+		owner := e.Data.Owner.DisplayName
+		if owner == "" {
+			owner = e.Data.Owner.Username
+		}
 		out = append(out, Emote{
 			Name:      e.Name,
 			ID:        e.ID,
 			URL:       "https:" + e.Data.Host.URL + "/" + file,
 			Provider:  SevenTV,
+			Owner:     owner,
 			ZeroWidth: e.Data.Flags&sevenTVZeroWidth != 0,
 			Animated:  e.Data.Animated,
 		})
@@ -321,14 +333,23 @@ type bttvEmote struct {
 	Code      string `json:"code"`
 	ImageType string `json:"imageType"`
 	Animated  bool   `json:"animated"`
+	User      struct {
+		DisplayName string `json:"displayName"`
+		Name        string `json:"name"`
+	} `json:"user"`
 }
 
 func (e bttvEmote) toEmote() Emote {
+	owner := e.User.DisplayName
+	if owner == "" {
+		owner = e.User.Name
+	}
 	return Emote{
 		Name:     e.Code,
 		ID:       e.ID,
 		URL:      "https://cdn.betterttv.net/emote/" + e.ID + "/3x." + e.ImageType,
 		Provider: BTTV,
+		Owner:    owner,
 		Animated: e.Animated,
 	}
 }

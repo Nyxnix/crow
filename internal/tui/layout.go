@@ -69,10 +69,19 @@ type hit struct {
 	msg    int // index into the model's message slice
 }
 
+// ehit records where a clickable emote landed. Unlike a username hit there can
+// be several on one line, so they are carried as a slice with absolute rows.
+type ehit struct {
+	row    int
+	x0, x1 int
+	emote  chat.Emote
+}
+
 // line is one laid-out screen line.
 type line struct {
-	text string
-	hit  *hit // non-nil when this line contains a username
+	text   string
+	hit    *hit   // non-nil when this line contains a username
+	emotes []ehit // clickable emotes on this line, if any
 }
 
 // layout renders messages into screen lines and records where each username
@@ -120,8 +129,9 @@ func layout(msgs []chat.Message, width int, style *styles, gfx *kitty.Cache) []l
 		// message, emotes become inline images; a deleted message and terminals
 		// without graphics get plain (struck) text with emote names.
 		var bodyLines []string
+		var spans [][]emoteSpan
 		if gfx != nil && !m.Deleted {
-			bodyLines = layoutBodyEmotes(m, firstW, width-continuationIndent, style, gfx)
+			bodyLines, spans = layoutBodyEmotes(m, firstW, width-continuationIndent, style, gfx)
 		} else {
 			for _, c := range wrap(m.Text, firstW, width-continuationIndent) {
 				bodyLines = append(bodyLines, textStyle.Render(c))
@@ -132,11 +142,22 @@ func layout(msgs []chat.Message, width int, style *styles, gfx *kitty.Cache) []l
 			first = bodyLines[0]
 		}
 
+		nameRow := len(out)
 		h := &hit{
-			row: len(out),
+			row: nameRow,
 			x0:  nameStart,
 			x1:  nameStart + runewidth.StringWidth(name),
 			msg: i,
+		}
+
+		// Emotes on body line 0 sit after the prefix; continuation lines are only
+		// indented. spanHits maps a packed line's spans to absolute click boxes.
+		spanHits := func(row, colOffset int, ss []emoteSpan) []ehit {
+			var hs []ehit
+			for _, s := range ss {
+				hs = append(hs, ehit{row: row, x0: colOffset + s.x0, x1: colOffset + s.x1, emote: *s.emote})
+			}
+			return hs
 		}
 
 		var b strings.Builder
@@ -148,12 +169,19 @@ func layout(msgs []chat.Message, width int, style *styles, gfx *kitty.Cache) []l
 		if m.Deleted {
 			b.WriteString(style.dim.Render(" ✗ deleted"))
 		}
-		out = append(out, line{text: b.String(), hit: h})
+		firstLine := line{text: b.String(), hit: h}
+		if len(spans) > 0 {
+			firstLine.emotes = spanHits(nameRow, prefixW, spans[0])
+		}
+		out = append(out, firstLine)
 
-		for _, c := range bodyLines[1:] {
-			out = append(out, line{
-				text: strings.Repeat(" ", continuationIndent) + c,
-			})
+		for k, c := range bodyLines[1:] {
+			row := nameRow + 1 + k
+			l := line{text: strings.Repeat(" ", continuationIndent) + c}
+			if k+1 < len(spans) {
+				l.emotes = spanHits(row, continuationIndent, spans[k+1])
+			}
+			out = append(out, l)
 		}
 	}
 	return out
@@ -167,16 +195,18 @@ type bodyToken struct {
 
 // renderedToken is a body token after styling: its on-screen string and its
 // true display width in cells (which for an emote image is not derivable from
-// the string, so it is carried explicitly).
+// the string, so it is carried explicitly). emote is set when the token is an
+// emote, so packing can report where it landed for click handling.
 type renderedToken struct {
-	str string
-	w   int
+	str   string
+	w     int
+	emote *chat.Emote
 }
 
 // layoutBodyEmotes renders a message body into styled lines with emotes shown
 // as inline images. An emote whose image has not loaded (or failed) falls back
 // to its name, so the line is never empty where an emote should be.
-func layoutBodyEmotes(m chat.Message, firstW, restW int, style *styles, gfx *kitty.Cache) []string {
+func layoutBodyEmotes(m chat.Message, firstW, restW int, style *styles, gfx *kitty.Cache) ([]string, [][]emoteSpan) {
 	if restW < 1 {
 		restW = 1
 	}
@@ -205,14 +235,20 @@ func layoutBodyEmotes(m chat.Message, firstW, restW int, style *styles, gfx *kit
 				url = kitty.AnimatedURL(url)
 			}
 			if img, cols, ok := gfx.Render(url); ok {
-				rendered = append(rendered, renderedToken{str: img, w: cols})
+				rendered = append(rendered, renderedToken{str: img, w: cols, emote: t.emote})
 				continue
 			}
 		}
-		rendered = append(rendered, renderedToken{str: style.text.Render(t.text), w: runewidth.StringWidth(t.text)})
+		rendered = append(rendered, renderedToken{str: style.text.Render(t.text), w: runewidth.StringWidth(t.text), emote: t.emote})
 	}
 
 	return packTokens(rendered, firstW, restW)
+}
+
+// emoteSpan marks where an emote token landed within one packed line.
+type emoteSpan struct {
+	emote  *chat.Emote
+	x0, x1 int // columns within the line
 }
 
 // tokenizeBody splits a message into words, marking those that are emotes.
@@ -250,9 +286,11 @@ func tokenizeBody(m chat.Message) []bodyToken {
 // packTokens greedily packs rendered tokens into lines, one space between
 // tokens, honoring the narrower first-line budget. Every token is assumed to
 // fit a line on its own (splitWord guarantees it for text; emotes are small).
-func packTokens(tokens []renderedToken, firstW, restW int) []string {
+func packTokens(tokens []renderedToken, firstW, restW int) ([]string, [][]emoteSpan) {
 	var lines []string
+	var spans [][]emoteSpan
 	var cur strings.Builder
+	var curSpans []emoteSpan
 	curW := 0
 	avail := func() int {
 		if len(lines) == 0 {
@@ -262,7 +300,9 @@ func packTokens(tokens []renderedToken, firstW, restW int) []string {
 	}
 	flush := func() {
 		lines = append(lines, cur.String())
+		spans = append(spans, curSpans)
 		cur.Reset()
+		curSpans = nil
 		curW = 0
 	}
 
@@ -279,13 +319,16 @@ func packTokens(tokens []renderedToken, firstW, restW int) []string {
 			cur.WriteByte(' ')
 			curW++
 		}
+		if t.emote != nil {
+			curSpans = append(curSpans, emoteSpan{emote: t.emote, x0: curW, x1: curW + t.w})
+		}
 		cur.WriteString(t.str)
 		curW += t.w
 	}
 	if curW > 0 || len(lines) == 0 {
 		flush()
 	}
-	return lines
+	return lines, spans
 }
 
 // splitWord chops an unbreakable word into width-sized pieces, measuring by
