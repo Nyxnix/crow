@@ -4,17 +4,24 @@ package config
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 // Config is the persisted app configuration.
 type Config struct {
+	// OverlayEnabled starts the overlay server. When false, no browser source is
+	// served and the status bar hides the overlay count.
+	OverlayEnabled bool `json:"overlay_enabled"`
 	// OverlayAddr is where the overlay server listens.
 	OverlayAddr string `json:"overlay_addr"`
 	// OverlayChannel is the channel whose chat the overlay shows. Empty means
 	// the first channel opened this session.
 	OverlayChannel string `json:"overlay_channel"`
+	// Overlay holds the visual options the browser source reads from its URL.
+	Overlay OverlayOptions `json:"overlay"`
 	// Channels are the channels to reopen on the next launch.
 	Channels []string `json:"channels"`
 	// Anonymous records that the user chose to browse without logging in, so the
@@ -22,9 +29,77 @@ type Config struct {
 	Anonymous bool `json:"anonymous"`
 }
 
+// OverlayOptions are the jChat-style overlay parameters. They map one-to-one to
+// the query params overlay.html reads; OverlayURL turns them into that URL.
+type OverlayOptions struct {
+	Align        string `json:"align"`         // "bottom" or "top"
+	Font         int    `json:"font"`          // index into the overlay's font list, 0-4
+	Size         int    `json:"size"`          // font size, px
+	Stroke       int    `json:"stroke"`        // text outline width, px
+	Fade         int    `json:"fade"`          // seconds before a message fades; 0 = never
+	Max          int    `json:"max"`           // max messages kept on screen
+	Animate      bool   `json:"animate"`       // slide-in animation
+	Badges       bool   `json:"badges"`        // show badges
+	HideCommands bool   `json:"hide_commands"` // hide messages starting with "!"
+	Bots         string `json:"bots"`          // comma-separated logins to hide
+}
+
 // Default is the config used when none is saved yet.
 func Default() Config {
-	return Config{OverlayAddr: "127.0.0.1:7788"}
+	return Config{
+		OverlayEnabled: true,
+		OverlayAddr:    "127.0.0.1:7788",
+		Overlay: OverlayOptions{
+			Align:   "bottom",
+			Size:    20,
+			Stroke:  2,
+			Max:     50,
+			Animate: true,
+			Badges:  true,
+		},
+	}
+}
+
+// OverlayURL is the browser-source URL for OBS, encoding only the options that
+// differ from the overlay's own defaults so a stock setup stays a clean "/".
+func (c Config) OverlayURL() string {
+	o := c.Overlay
+	q := url.Values{}
+	if !o.Animate {
+		q.Set("animate", "0")
+	}
+	if !o.Badges {
+		q.Set("badges", "0")
+	}
+	if o.HideCommands {
+		q.Set("hide_commands", "1")
+	}
+	if o.Align == "top" {
+		q.Set("align", "top")
+	}
+	if o.Font != 0 {
+		q.Set("font", strconv.Itoa(o.Font))
+	}
+	if o.Size != 20 {
+		q.Set("size", strconv.Itoa(o.Size))
+	}
+	if o.Stroke != 2 {
+		q.Set("stroke", strconv.Itoa(o.Stroke))
+	}
+	if o.Fade != 0 {
+		q.Set("fade", strconv.Itoa(o.Fade))
+	}
+	if o.Max != 50 {
+		q.Set("max", strconv.Itoa(o.Max))
+	}
+	if o.Bots != "" {
+		q.Set("bots", o.Bots)
+	}
+	u := "http://" + c.OverlayAddr + "/"
+	if len(q) > 0 {
+		u += "?" + q.Encode()
+	}
+	return u
 }
 
 func path() (string, error) {

@@ -91,17 +91,23 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 	}
 
 	// One overlay server for the whole app, pinned to a single channel so
-	// switching tabs never disrupts the stream.
+	// switching tabs never disrupts the stream. Headless mode is overlay-only, so
+	// it serves regardless of the toggle.
 	ov := overlay.New()
-	ln, err := net.Listen("tcp", cfg.OverlayAddr)
-	if err != nil {
-		return fmt.Errorf("overlay: %w", err)
+	if cfg.OverlayEnabled || headless {
+		ln, err := net.Listen("tcp", cfg.OverlayAddr)
+		if err != nil {
+			return fmt.Errorf("overlay: %w", err)
+		}
+		srv := &http.Server{Handler: ov.Handler()}
+		go srv.Serve(ln)
+		defer srv.Close()
 	}
-	srv := &http.Server{Handler: ov.Handler()}
-	go srv.Serve(ln)
-	defer srv.Close()
 
-	ovState := &overlayState{configured: strings.ToLower(cfg.OverlayChannel)}
+	ovState := &overlayState{
+		configured: strings.ToLower(cfg.OverlayChannel),
+		enabled:    cfg.OverlayEnabled || headless,
+	}
 
 	if headless {
 		return runHeadless(ctx, channels[0], cfg.OverlayAddr, ov, ovState)
@@ -136,7 +142,7 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 	})
 
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
-	_, err = p.Run()
+	_, err := p.Run()
 	return err
 }
 
@@ -144,6 +150,7 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 // so deleted/banned content is scoped and tab switching never disrupts it.
 type overlayState struct {
 	mu         sync.Mutex
+	enabled    bool   // overlay off in config: no channel ever publishes
 	configured string // channel the config pins the overlay to; "" = first opened
 	owner      string
 }
@@ -153,6 +160,9 @@ type overlayState struct {
 func (o *overlayState) claim(channel string) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if !o.enabled {
+		return false
+	}
 	if o.owner == channel {
 		return true
 	}

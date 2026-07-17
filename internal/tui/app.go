@@ -207,7 +207,7 @@ func (a *App) chatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+s":
 		a.mode = modeSettings
-		a.settings = newSettingsState(a.login, a.cfg)
+		a.settings = newSettingsState(a.login, &a.cfg)
 		return a, nil
 	case "ctrl+t":
 		// Add-channel prompt: reuse the splash, returnable to chat on Esc.
