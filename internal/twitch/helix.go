@@ -12,7 +12,9 @@ import (
 	"time"
 )
 
-const helixBase = "https://api.twitch.tv/helix"
+// helixBase is a var, not a const, so tests can point it at a stand-in server;
+// nothing else reassigns it.
+var helixBase = "https://api.twitch.tv/helix"
 
 // Helix performs moderation actions through the Twitch API. It implements the
 // TUI's Moderator interface.

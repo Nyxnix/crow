@@ -8,6 +8,7 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/typetype/internal/kitty"
 )
 
 func TestWrapBreaksOnSpaces(t *testing.T) {
@@ -180,6 +181,82 @@ func TestRenderBadgesTextFallback(t *testing.T) {
 	// A plain user contributes no badge segment.
 	if str, w := renderBadges(chat.Message{}, s, nil); str != "" || w != 0 {
 		t.Errorf("plain user badges = (%q, %d), want empty", str, w)
+	}
+}
+
+func TestTokenizeBody(t *testing.T) {
+	m := chat.Message{
+		Text: "hello Kappa world",
+		Emotes: []chat.Emote{
+			{Name: "Kappa", URL: "https://cdn/kappa", Start: 6, End: 11},
+		},
+	}
+	tokens := tokenizeBody(m)
+	if len(tokens) != 3 {
+		t.Fatalf("got %d tokens, want 3: %+v", len(tokens), tokens)
+	}
+	if tokens[0].text != "hello" || tokens[0].emote != nil {
+		t.Errorf("token 0 = %+v, want plain 'hello'", tokens[0])
+	}
+	if tokens[1].text != "Kappa" || tokens[1].emote == nil {
+		t.Errorf("token 1 = %+v, want the Kappa emote", tokens[1])
+	}
+	if tokens[2].text != "world" || tokens[2].emote != nil {
+		t.Errorf("token 2 = %+v, want plain 'world'", tokens[2])
+	}
+}
+
+// Emote positions index runes, so a multi-byte prefix must not misplace them.
+func TestTokenizeBodyRuneIndexed(t *testing.T) {
+	m := chat.Message{
+		Text:   "日本語 PogU",
+		Emotes: []chat.Emote{{Name: "PogU", URL: "https://cdn/pogu", Start: 4, End: 8}},
+	}
+	tokens := tokenizeBody(m)
+	if len(tokens) != 2 || tokens[1].emote == nil || tokens[1].text != "PogU" {
+		t.Errorf("got %+v, want the PogU emote as the second token", tokens)
+	}
+}
+
+func TestPackTokens(t *testing.T) {
+	toks := []renderedToken{
+		{str: "aaa", w: 3}, {str: "bbb", w: 3}, {str: "ccc", w: 3},
+	}
+	// Width 7 fits "aaa bbb" (7) then "ccc".
+	lines := packTokens(toks, 7, 7)
+	if len(lines) != 2 || lines[0] != "aaa bbb" || lines[1] != "ccc" {
+		t.Errorf("got %q, want [aaa bbb, ccc]", lines)
+	}
+}
+
+// An emote token keeps its declared cell width even though its string (an image
+// escape) has a different rune length, so packing places it correctly.
+func TestPackTokensUsesDeclaredWidth(t *testing.T) {
+	toks := []renderedToken{
+		{str: "word", w: 4},
+		{str: "\x1bIMAGE\x1b", w: 2}, // pretend image escape, 2 cells
+		{str: "next", w: 4},
+	}
+	// Budget 6: "word" (4) + emote (2) = 6 fits with a space? 4+1+2=7 > 6, so
+	// the emote wraps. Then emote(2)+space+next(4)=7 > 6, next wraps too.
+	lines := packTokens(toks, 6, 6)
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3 (declared widths respected): %q", len(lines), lines)
+	}
+}
+
+// With graphics but an unloaded emote, the body falls back to the emote name so
+// nothing is missing while the image loads.
+func TestLayoutBodyEmotesFallsBackToName(t *testing.T) {
+	gfx := kitty.New(nil) // nothing loaded; Render returns not-ready
+	m := chat.Message{
+		Text:   "gg Kappa",
+		Emotes: []chat.Emote{{Name: "Kappa", URL: "https://cdn/never-loads", Start: 3, End: 8}},
+	}
+	lines := layoutBodyEmotes(m, 40, 40, newStyles(), gfx)
+	joined := strings.Join(lines, " ")
+	if !strings.Contains(joined, "Kappa") {
+		t.Errorf("unloaded emote not shown as its name: %q", lines)
 	}
 }
 

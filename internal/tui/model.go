@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -50,7 +51,8 @@ type Model struct {
 	emotes  *emote.Registry
 	mod     Moderator
 	info    InfoProvider
-	clients func() int // connected overlay browser sources
+	stats   func() StreamStats // live viewer/uptime stats, nil to hide
+	clients func() int         // connected overlay browser sources
 
 	// send delivers a typed message to Twitch. Nil when not logged in, which is
 	// also what decides whether the input line is shown and focused.
@@ -75,6 +77,10 @@ type Options struct {
 	Mod      Moderator
 	Info     InfoProvider
 	Clients  func() int
+
+	// Stats returns the channel's live viewer count, uptime and session average
+	// for the status bar. Leave nil to omit them.
+	Stats func() StreamStats
 
 	// Send delivers a typed message. Leave nil for a read-only (not logged in)
 	// session; the input line then shows a hint instead of a prompt.
@@ -102,6 +108,7 @@ func NewModel(o Options) *Model {
 		emotes:    o.Emotes,
 		mod:       o.Mod,
 		info:      o.Info,
+		stats:     o.Stats,
 		clients:   o.Clients,
 		send:      o.Send,
 		input:     ti,
@@ -110,16 +117,19 @@ func NewModel(o Options) *Model {
 		redraw:    make(chan struct{}, 1),
 	}
 	if kitty.Supported() {
-		// onReady coalesces: a full buffer just means a redraw is already
-		// pending, which is exactly what we want.
-		m.gfx = kitty.New(func() {
-			select {
-			case m.redraw <- struct{}{}:
-			default:
-			}
-		})
+		m.gfx = kitty.New(m.Redraw)
 	}
 	return m
+}
+
+// Redraw wakes the update loop so the next View reflects state changed off the
+// UI goroutine — a just-loaded image, or fresh stream stats. It never blocks: a
+// full buffer already means a redraw is pending, which is what we want.
+func (m *Model) Redraw() {
+	select {
+	case m.redraw <- struct{}{}:
+	default:
+	}
 }
 
 // chatArrived carries one message from the IRC goroutine into the update loop.
@@ -170,9 +180,8 @@ func (m *Model) Init() tea.Cmd {
 	if m.send != nil {
 		cmds = append(cmds, textinput.Blink)
 	}
-	if m.gfx != nil {
-		cmds = append(cmds, waitRedraw(m.redraw))
-	}
+	// The redraw waiter is always active: both graphics and stats wake it.
+	cmds = append(cmds, waitRedraw(m.redraw))
 	if m.modEvents != nil {
 		cmds = append(cmds, waitModEvent(m.modEvents))
 	}
@@ -477,8 +486,25 @@ func (m *Model) inputLine() string {
 	return m.input.View()
 }
 
+// StreamStats is the live channel status shown in the status bar.
+type StreamStats struct {
+	Live       bool
+	Viewers    int
+	AvgViewers int
+	Uptime     time.Duration
+}
+
 func (m *Model) statusBar() string {
+	// Left: channel and, when live, the stream stats.
 	left := fmt.Sprintf(" #%s ", m.channel)
+	if m.stats != nil {
+		if s := m.stats(); s.Live {
+			left += fmt.Sprintf("· %s viewers (avg %s) · up %s ",
+				humanCount(s.Viewers), humanCount(s.AvgViewers), shortDuration(s.Uptime))
+		} else {
+			left += "· offline "
+		}
+	}
 
 	var parts []string
 	if m.emotes != nil {
@@ -505,4 +531,26 @@ func (m *Model) statusBar() string {
 		gap = 0
 	}
 	return m.styles.status.Width(m.width).Render(left + strings.Repeat(" ", gap) + right)
+}
+
+// humanCount formats a viewer count compactly: 1234 -> "1.2k".
+func humanCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// shortDuration formats an uptime as "3h 24m" or "24m".
+func shortDuration(d time.Duration) string {
+	h := int(d.Hours())
+	mnt := int(d.Minutes()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, mnt)
+	}
+	return fmt.Sprintf("%dm", mnt)
 }

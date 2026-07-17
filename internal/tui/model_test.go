@@ -196,6 +196,44 @@ func TestCardLayoutFitsAndIsStable(t *testing.T) {
 	}
 }
 
+func TestStatusBarShowsStats(t *testing.T) {
+	m := NewModel(Options{
+		Channel:  "buh",
+		Incoming: make(chan chat.Message),
+		Stats: func() StreamStats {
+			return StreamStats{Live: true, Viewers: 1234, AvgViewers: 1000, Uptime: 3*time.Hour + 24*time.Minute}
+		},
+	})
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	bar := m.statusBar()
+	for _, want := range []string{"1.2k viewers", "avg 1.0k", "up 3h 24m"} {
+		if !strings.Contains(bar, want) {
+			t.Errorf("status bar missing %q:\n%s", want, bar)
+		}
+	}
+}
+
+func TestStatusBarOffline(t *testing.T) {
+	m := NewModel(Options{
+		Channel:  "buh",
+		Incoming: make(chan chat.Message),
+		Stats:    func() StreamStats { return StreamStats{Live: false} },
+	})
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	if !strings.Contains(m.statusBar(), "offline") {
+		t.Errorf("status bar should show offline:\n%s", m.statusBar())
+	}
+}
+
+func TestHumanCount(t *testing.T) {
+	cases := map[int]string{0: "0", 42: "42", 999: "999", 1200: "1.2k", 1_500_000: "1.5M"}
+	for n, want := range cases {
+		if got := humanCount(n); got != want {
+			t.Errorf("humanCount(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
 // --- card info section -----------------------------------------------------
 
 type fakeInfo struct {

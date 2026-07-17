@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -197,6 +198,23 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 		sendFn = sender.Send
 	}
 
+	// Stream stats need a token; build the poller first so the model can read
+	// its snapshot, then wire OnUpdate to the model and start polling.
+	var poller *twitch.StreamPoller
+	var statsFn func() tui.StreamStats
+	if session != nil {
+		poller = &twitch.StreamPoller{
+			ClientID: clientID(),
+			Token:    session.AccessToken,
+			Login:    channel,
+			Interval: time.Minute,
+		}
+		statsFn = func() tui.StreamStats {
+			s := poller.Snapshot()
+			return tui.StreamStats{Live: s.Live, Viewers: s.Viewers, AvgViewers: s.AvgViewers, Uptime: s.Uptime}
+		}
+	}
+
 	model := tui.NewModel(tui.Options{
 		Channel:   channel,
 		Incoming:  toTUI,
@@ -205,8 +223,14 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 		Clients:   ov.Clients,
 		Mod:       mod,
 		Info:      infoProvider{&ivr.Client{}},
+		Stats:     statsFn,
 		Send:      sendFn,
 	})
+
+	if poller != nil {
+		poller.OnUpdate = model.Redraw // set before Run, so no concurrent write
+		go poller.Run(ctx)
+	}
 
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
 	_, err = p.Run()
