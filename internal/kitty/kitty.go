@@ -13,16 +13,17 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image"
+	"image/draw"
+	"image/gif"
+	"image/png"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	_ "image/gif"
-	"image/png"
-
-	_ "golang.org/x/image/webp" // decode 7TV/BTTV webp emotes
+	_ "golang.org/x/image/webp" // decode static 7TV/BTTV webp emotes
 )
 
 // placeholder is U+10EEEE, the code point a cell holds to display part of an
@@ -52,14 +53,16 @@ func Supported() bool {
 	return false
 }
 
-// entry is one image's state in the cache.
+// entry is one image's state in the cache. An animated emote has more than one
+// frame; a static one has exactly one.
 type entry struct {
 	id          uint32
-	cols        int    // display width in cells (height is one row)
-	png         []byte // normalized PNG bytes, ready to transmit
-	ready       bool   // fetched and decoded
-	failed      bool   // fetch/decode failed; do not retry
-	transmitted bool   // transmit escape has been emitted to the terminal
+	cols        int      // display width in cells (height is one row)
+	frames      [][]byte // PNG bytes per frame
+	delays      []int    // per-frame display time in ms
+	ready       bool     // fetched and decoded
+	failed      bool     // fetch/decode failed; do not retry
+	transmitted bool     // upload escape has been emitted to the terminal
 }
 
 // Cache fetches, decodes and remembers images by URL. It is safe for concurrent
@@ -131,7 +134,7 @@ func (c *Cache) FlushUploads() string {
 	var b strings.Builder
 	for _, e := range c.byURL {
 		if e.ready && !e.transmitted {
-			writeTransmit(&b, e.id, e.cols, e.png)
+			writeUpload(&b, e)
 			e.transmitted = true
 		}
 	}
@@ -143,15 +146,14 @@ func (c *Cache) FlushUploads() string {
 // blip) doesn't drop the image for the whole session.
 func (c *Cache) load(url string, e *entry) {
 	var (
-		png  []byte
-		cols int
-		err  error
+		d   decoded
+		err error
 	)
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
 		}
-		if png, cols, err = c.fetch(url); err == nil {
+		if d, err = c.fetch(url); err == nil {
 			break
 		}
 	}
@@ -160,7 +162,7 @@ func (c *Cache) load(url string, e *entry) {
 	if err != nil {
 		e.failed = true
 	} else {
-		e.png, e.cols, e.ready = png, cols, true
+		e.frames, e.delays, e.cols, e.ready = d.frames, d.delays, d.cols, true
 	}
 	c.mu.Unlock()
 
@@ -169,28 +171,97 @@ func (c *Cache) load(url string, e *entry) {
 	}
 }
 
-// fetch downloads the image, decodes it (webp/png/gif), and re-encodes it as
-// PNG for transmission, returning the cell width to display it at.
-func (c *Cache) fetch(url string) (pngBytes []byte, cols int, err error) {
+// decoded is the result of fetching an image: one PNG frame for a static image,
+// several for an animated one, with per-frame delays and the display width.
+type decoded struct {
+	frames [][]byte
+	delays []int
+	cols   int
+}
+
+// fetch downloads and decodes an image. GIFs decode to all their frames;
+// animated WebP (which the Go decoder cannot read) is retried as the GIF the
+// provider serves alongside it. Every frame is re-encoded as PNG for upload.
+func (c *Cache) fetch(url string) (decoded, error) {
 	resp, err := c.client().Get(url)
 	if err != nil {
-		return nil, 0, err
+		return decoded{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("%s", resp.Status)
+		return decoded{}, fmt.Errorf("%s", resp.Status)
 	}
-
-	img, _, err := image.Decode(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, 0, err
+		return decoded{}, err
 	}
 
+	// A GIF may be animated; decode every frame.
+	if bytes.HasPrefix(raw, []byte("GIF8")) {
+		return decodeGIF(raw)
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		// x/image/webp can't read animated WebP; providers (7TV, BTTV) serve a
+		// GIF at the same path, so try that once.
+		if alt := gifAlternative(url); alt != "" {
+			return c.fetch(alt)
+		}
+		return decoded{}, err
+	}
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
-		return nil, 0, err
+		return decoded{}, err
 	}
-	return buf.Bytes(), cellsWide(img.Bounds().Dx(), img.Bounds().Dy()), nil
+	return decoded{frames: [][]byte{buf.Bytes()}, delays: []int{0}, cols: cellsWide(img.Bounds().Dx(), img.Bounds().Dy())}, nil
+}
+
+// gifAlternative maps a WebP emote URL to its GIF sibling, or "" if not a WebP.
+// It also steps the size down: an animated emote shows at about two cells, so
+// the 4x source used for the overlay would upload many megabytes of frames for
+// no visible gain — 2x is plenty.
+func gifAlternative(url string) string {
+	if !strings.HasSuffix(url, ".webp") {
+		return ""
+	}
+	u := strings.TrimSuffix(url, ".webp") + ".gif"
+	u = strings.Replace(u, "/4x.gif", "/2x.gif", 1)
+	u = strings.Replace(u, "/3x.gif", "/2x.gif", 1)
+	return u
+}
+
+// decodeGIF composites each GIF frame onto a full canvas (frames may be partial
+// regions) and PNG-encodes it, returning per-frame delays in milliseconds.
+func decodeGIF(raw []byte) (decoded, error) {
+	g, err := gif.DecodeAll(bytes.NewReader(raw))
+	if err != nil || len(g.Image) == 0 {
+		return decoded{}, fmt.Errorf("gif: %v", err)
+	}
+	b := g.Image[0].Bounds()
+	if len(g.Image) > 1 {
+		// Later frames may extend the first; size to the logical screen.
+		b = image.Rect(0, 0, g.Config.Width, g.Config.Height)
+	}
+	canvas := image.NewRGBA(b)
+
+	out := decoded{cols: cellsWide(b.Dx(), b.Dy())}
+	for i, frame := range g.Image {
+		draw.Draw(canvas, frame.Bounds(), frame, frame.Bounds().Min, draw.Over)
+		var buf bytes.Buffer
+		snap := image.NewRGBA(canvas.Bounds())
+		copy(snap.Pix, canvas.Pix)
+		if err := png.Encode(&buf, snap); err != nil {
+			return decoded{}, err
+		}
+		out.frames = append(out.frames, buf.Bytes())
+		ms := g.Delay[i] * 10 // GIF delays are hundredths of a second
+		if ms <= 0 {
+			ms = 100
+		}
+		out.delays = append(out.delays, ms)
+	}
+	return out, nil
 }
 
 // cellsWide picks a cell width that preserves the image's aspect ratio at a
@@ -211,10 +282,31 @@ func cellsWide(w, h int) int {
 	return cols
 }
 
-// writeTransmit emits the protocol sequence that uploads the PNG as a virtual
-// placement (U=1) sized cols x 1, chunked at the protocol's 4096-byte limit.
-func writeTransmit(b *strings.Builder, id uint32, cols int, png []byte) {
-	data := base64.StdEncoding.EncodeToString(png)
+// writeUpload emits the protocol to upload an image and, if it has more than
+// one frame, its animation. The first frame is a virtual placement (U=1) sized
+// cols x 1; extra frames are composed with a=f and the animation is set running
+// with a=a. A terminal that ignores the animation controls simply shows the
+// first frame, so this degrades to a static image.
+func writeUpload(b *strings.Builder, e *entry) {
+	// Root frame with the placement.
+	writeChunked(b, fmt.Sprintf("a=T,U=1,i=%d,f=100,c=%d,r=1,q=2", e.id, e.cols), e.frames[0])
+
+	if len(e.frames) <= 1 {
+		return
+	}
+	// Additional frames: z is this frame's display time in ms.
+	for i := 1; i < len(e.frames); i++ {
+		writeChunked(b, fmt.Sprintf("a=f,i=%d,f=100,z=%d,q=2", e.id, e.delays[i]), e.frames[i])
+	}
+	// Set the first frame's gap and start looping playback.
+	fmt.Fprintf(b, "\x1b_Ga=a,i=%d,r=1,z=%d,q=2\x1b\\", e.id, e.delays[0])
+	fmt.Fprintf(b, "\x1b_Ga=a,i=%d,s=3,v=0,q=2\x1b\\", e.id)
+}
+
+// writeChunked emits one graphics command with the given control keys, its
+// base64 payload split into the protocol's 4096-byte chunks.
+func writeChunked(b *strings.Builder, control string, payload []byte) {
+	data := base64.StdEncoding.EncodeToString(payload)
 	const chunk = 4096
 	first := true
 	for len(data) > 0 {
@@ -226,7 +318,7 @@ func writeTransmit(b *strings.Builder, id uint32, cols int, png []byte) {
 			more = 1
 		}
 		if first {
-			fmt.Fprintf(b, "\x1b_Ga=T,U=1,i=%d,f=100,c=%d,r=1,q=2,m=%d;%s\x1b\\", id, cols, more, part)
+			fmt.Fprintf(b, "\x1b_G%s,m=%d;%s\x1b\\", control, more, part)
 			first = false
 		} else {
 			fmt.Fprintf(b, "\x1b_Gm=%d;%s\x1b\\", more, part)

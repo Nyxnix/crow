@@ -218,10 +218,13 @@ func (a *App) chatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+w":
 		a.closeActiveTab()
 		return a, nil
-	case "ctrl+right", "ctrl+shift+right":
+	// ctrl+n (next) / ctrl+b (back) are the primary switch keys — adjacent and
+	// not grabbed by the OS. The arrows are a bonus for terminals where they get
+	// through (macOS binds ctrl+arrow to Mission Control, so it never does there).
+	case "ctrl+n", "ctrl+right", "ctrl+shift+right":
 		a.switchTab(a.active + 1)
 		return a, nil
-	case "ctrl+left", "ctrl+shift+left":
+	case "ctrl+b", "ctrl+left", "ctrl+shift+left":
 		a.switchTab(a.active - 1)
 		return a, nil
 	}
@@ -408,7 +411,7 @@ func (a *App) tabBar() string {
 			b.WriteString(a.styles.tabInactive.Render(label))
 		}
 	}
-	hint := a.styles.dim.Render(" ^T new · ^W close · ^←/^→ switch · ^S settings ")
+	hint := a.styles.dim.Render(" ^T new · ^W close · ^N/^B switch · ^S settings ")
 	used := lipgloss.Width(b.String()) + lipgloss.Width(hint)
 	if gap := a.width - used; gap > 0 {
 		b.WriteString(strings.Repeat(" ", gap))
