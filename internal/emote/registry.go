@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/crow/internal/chat"
 )
 
 // Provider names the service an emote came from, so the TUI and overlay can say

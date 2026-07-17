@@ -1,4 +1,4 @@
-// Command typetype reads a live chat in the terminal and serves an overlay for
+// Command crow reads a live chat in the terminal and serves an overlay for
 // OBS to point a browser source at.
 package main
 
@@ -17,23 +17,23 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Nyxnix/typetype/internal/auth"
-	"github.com/Nyxnix/typetype/internal/badge"
-	"github.com/Nyxnix/typetype/internal/chat"
-	"github.com/Nyxnix/typetype/internal/config"
-	"github.com/Nyxnix/typetype/internal/emote"
-	"github.com/Nyxnix/typetype/internal/ivr"
-	"github.com/Nyxnix/typetype/internal/overlay"
-	"github.com/Nyxnix/typetype/internal/tui"
-	"github.com/Nyxnix/typetype/internal/twitch"
+	"github.com/Nyxnix/crow/internal/auth"
+	"github.com/Nyxnix/crow/internal/badge"
+	"github.com/Nyxnix/crow/internal/chat"
+	"github.com/Nyxnix/crow/internal/config"
+	"github.com/Nyxnix/crow/internal/emote"
+	"github.com/Nyxnix/crow/internal/ivr"
+	"github.com/Nyxnix/crow/internal/overlay"
+	"github.com/Nyxnix/crow/internal/tui"
+	"github.com/Nyxnix/crow/internal/twitch"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// Subcommands come before flags: `typetype login`, `typetype logout`,
-	// `typetype whoami`. Anything else is the default chat/overlay run.
+	// Subcommands come before flags: `crow login`, `crow logout`,
+	// `crow whoami`. Anything else is the default chat/overlay run.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "login":
@@ -64,7 +64,7 @@ func main() {
 	}
 
 	if *headless && len(channels) == 0 {
-		fmt.Fprintln(os.Stderr, "typetype: -headless needs -channel")
+		fmt.Fprintln(os.Stderr, "crow: -headless needs -channel")
 		os.Exit(2)
 	}
 
@@ -73,13 +73,13 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  typetype [-channel a,b,c] [-addr host:port] [-headless]")
-	fmt.Fprintln(os.Stderr, "  typetype login | logout | whoami")
+	fmt.Fprintln(os.Stderr, "  crow [-channel a,b,c] [-addr host:port] [-headless]")
+	fmt.Fprintln(os.Stderr, "  crow login | logout | whoami")
 }
 
 func exit(err error) {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "typetype:", err)
+		fmt.Fprintln(os.Stderr, "crow:", err)
 		os.Exit(1)
 	}
 }

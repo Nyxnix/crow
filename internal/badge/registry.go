@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/crow/internal/chat"
 )
 
 // Registry maps a badge's set and version to an image URL, for one channel plus

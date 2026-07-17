@@ -7,8 +7,8 @@ import (
 
 	"github.com/mattn/go-runewidth"
 
-	"github.com/Nyxnix/typetype/internal/chat"
-	"github.com/Nyxnix/typetype/internal/kitty"
+	"github.com/Nyxnix/crow/internal/chat"
+	"github.com/Nyxnix/crow/internal/kitty"
 )
 
 func TestWrapBreaksOnSpaces(t *testing.T) {

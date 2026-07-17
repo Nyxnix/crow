@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/crow/internal/chat"
 )
 
 func TestPublishReachesSubscriber(t *testing.T) {

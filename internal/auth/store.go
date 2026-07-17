@@ -23,7 +23,7 @@ func tokenPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "typetype", "token.json"), nil
+	return filepath.Join(dir, "crow", "token.json"), nil
 }
 
 // Save writes the token with owner-only permissions. It holds a live

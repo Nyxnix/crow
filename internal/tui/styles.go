@@ -3,7 +3,7 @@ package tui
 import (
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/crow/internal/chat"
 )
 
 // styles holds every lipgloss style the TUI renders with, so colors are decided

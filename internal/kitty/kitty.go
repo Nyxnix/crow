@@ -31,10 +31,10 @@ import (
 const placeholder = "\U0010EEEE"
 
 // Supported reports whether the current terminal speaks the kitty graphics
-// protocol. TYPETYPE_GRAPHICS=0/1 forces it off/on for terminals we don't
+// protocol. CROW_GRAPHICS=0/1 forces it off/on for terminals we don't
 // recognise or for debugging.
 func Supported() bool {
-	switch os.Getenv("TYPETYPE_GRAPHICS") {
+	switch os.Getenv("CROW_GRAPHICS") {
 	case "0", "false", "off":
 		return false
 	case "1", "true", "on":

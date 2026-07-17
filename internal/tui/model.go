@@ -12,9 +12,9 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Nyxnix/typetype/internal/chat"
-	"github.com/Nyxnix/typetype/internal/emote"
-	"github.com/Nyxnix/typetype/internal/kitty"
+	"github.com/Nyxnix/crow/internal/chat"
+	"github.com/Nyxnix/crow/internal/emote"
+	"github.com/Nyxnix/crow/internal/kitty"
 )
 
 // historyLimit caps messages held in memory. The user card filters this slice

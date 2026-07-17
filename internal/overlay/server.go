@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/crow/internal/chat"
 )
 
 //go:embed overlay.html

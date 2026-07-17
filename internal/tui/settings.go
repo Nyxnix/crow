@@ -8,8 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/Nyxnix/typetype/internal/chat"
-	"github.com/Nyxnix/typetype/internal/config"
+	"github.com/Nyxnix/crow/internal/chat"
+	"github.com/Nyxnix/crow/internal/config"
 )
 
 // The two settings pages: a short top menu, and the overlay sub-menu.

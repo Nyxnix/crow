@@ -1,4 +1,4 @@
-# TypeType
+# Crow
 
 A terminal chat client for live streaming, with a built-in OBS overlay.
 
@@ -34,14 +34,14 @@ Working for Twitch. See the roadmap below.
 Moderation needs a Twitch login. Reading chat and the overlay do not.
 
 ```sh
-typetype login     # opens a device-code flow: approve in your browser
-typetype whoami    # show the current login
-typetype logout
+crow login     # opens a device-code flow: approve in your browser
+crow whoami    # show the current login
+crow logout
 ```
 
 The token is stored owner-only under your OS config dir
-(`~/Library/Application Support/typetype` on macOS,
-`~/.config/typetype` on Linux). Twitch expires the refresh token after
+(`~/Library/Application Support/crow` on macOS,
+`~/.config/crow` on Linux). Twitch expires the refresh token after
 30 days idle; if that happens, run `login` again.
 
 ## Keys
@@ -66,8 +66,8 @@ Not logged in, chat is read-only: `j`/`k`/`g`/`G`/`PgUp`/`PgDn` scroll and
 Requires Go 1.24+.
 
 ```sh
-go install github.com/Nyxnix/typetype/cmd/typetype@latest
-typetype -channel <name>
+go install github.com/Nyxnix/crow/cmd/crow@latest
+crow -channel <name>
 ```
 
 Then add a browser source in OBS pointing at `http://127.0.0.1:7788`.

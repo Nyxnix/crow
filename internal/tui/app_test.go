@@ -5,7 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Nyxnix/typetype/internal/config"
+	"github.com/Nyxnix/crow/internal/config"
 )
 
 // fakeFactory returns a bare model for a channel and a no-op close.

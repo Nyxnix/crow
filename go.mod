@@ -1,4 +1,4 @@
-module github.com/Nyxnix/typetype
+module github.com/Nyxnix/crow
 
 go 1.26.5
 

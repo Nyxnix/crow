@@ -107,7 +107,7 @@ func path() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "typetype", "config.json"), nil
+	return filepath.Join(dir, "crow", "config.json"), nil
 }
 
 // Load reads the saved config, falling back to defaults for a missing file or

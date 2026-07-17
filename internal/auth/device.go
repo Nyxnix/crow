@@ -1,8 +1,8 @@
 // Package auth implements Twitch's OAuth device code flow and token storage.
 //
-// Device code flow is used because TypeType is a public client: it ships to
+// Device code flow is used because Crow is a public client: it ships to
 // anyone, so it cannot hold a client secret. The user authorizes on Twitch's
-// own page and TypeType only ever sees the resulting user token.
+// own page and Crow only ever sees the resulting user token.
 package auth
 
 import (

@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/crow/internal/chat"
 )
 
 // splashState is the startup / add-channel screen: it collects a channel to
@@ -123,7 +123,7 @@ func (a *App) splashView() string {
 	s := a.styles
 	var b strings.Builder
 
-	b.WriteString(s.splashTitle.Render("TypeType") + "\n")
+	b.WriteString(s.splashTitle.Render("Crow") + "\n")
 	b.WriteString(s.dim.Render("terminal Twitch chat with an OBS overlay") + "\n\n")
 
 	// Login status / inline login.

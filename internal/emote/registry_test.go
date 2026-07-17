@@ -3,7 +3,7 @@ package emote
 import (
 	"testing"
 
-	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/crow/internal/chat"
 )
 
 // testRegistry is loaded directly, bypassing the network.

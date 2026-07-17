@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>TypeType overlay</title>
+<title>Crow overlay</title>
 <style>
   :root {
     --size: 20px;
@@ -276,20 +276,20 @@
   }
 
   // EventSource reconnects on its own, which is what makes an OBS browser
-  // source survive a TypeType restart without anyone touching OBS.
+  // source survive a Crow restart without anyone touching OBS.
   const es = new EventSource("/events");
   es.addEventListener("message", (ev) => {
     try {
       addMessage(JSON.parse(ev.data));
     } catch (err) {
-      console.error("typetype: bad message", err);
+      console.error("crow: bad message", err);
     }
   });
   es.addEventListener("remove", (ev) => {
     try {
       removeMessages(JSON.parse(ev.data));
     } catch (err) {
-      console.error("typetype: bad remove", err);
+      console.error("crow: bad remove", err);
     }
   });
 })();

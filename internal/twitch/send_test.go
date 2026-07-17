@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/crow/internal/chat"
 )
 
 // fakeIRC is a local TLS server that stands in for Twitch: it completes enough

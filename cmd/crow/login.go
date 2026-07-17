@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Nyxnix/typetype/internal/auth"
-	"github.com/Nyxnix/typetype/internal/twitch"
+	"github.com/Nyxnix/crow/internal/auth"
+	"github.com/Nyxnix/crow/internal/twitch"
 )
 
 // login runs the device code flow interactively and stores the token, so mod
-// actions work on the next `typetype -channel ...` run.
+// actions work on the next `crow -channel ...` run.
 func login(ctx context.Context) error {
 	ac := &auth.Client{ClientID: clientID()}
 
@@ -20,7 +20,7 @@ func login(ctx context.Context) error {
 	}
 
 	fmt.Println()
-	fmt.Println("  To authorize TypeType, open this page and enter the code:")
+	fmt.Println("  To authorize Crow, open this page and enter the code:")
 	fmt.Println()
 	fmt.Printf("    %s\n", dc.VerificationURI)
 	fmt.Printf("    code: %s\n", dc.UserCode)
@@ -63,7 +63,7 @@ func whoami() error {
 		return err
 	}
 	if st == nil {
-		fmt.Println("Not logged in. Run: typetype login")
+		fmt.Println("Not logged in. Run: crow login")
 		return nil
 	}
 	fmt.Printf("Logged in as %s (id %s)\n", st.Login, st.UserID)

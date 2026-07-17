@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/crow/internal/chat"
 )
 
 // USERSTATE must populate the self-state so a sent-message echo can look like

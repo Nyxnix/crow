@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/Nyxnix/typetype/internal/config"
+	"github.com/Nyxnix/crow/internal/config"
 )
 
 // appMode is which screen the App is showing.
