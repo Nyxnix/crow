@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -48,6 +49,10 @@ type Model struct {
 	hits []hit
 	card *card
 
+	// lastRender is the message snapshot the current hit boxes index into, so a
+	// click maps to the right message regardless of buffer changes since render.
+	lastRender []chat.Message
+
 	emotes  *emote.Registry
 	mod     Moderator
 	info    InfoProvider
@@ -60,23 +65,25 @@ type Model struct {
 	input textinput.Model
 
 	// gfx renders badge images inline on terminals that support the kitty
-	// graphics protocol; nil elsewhere, where badges fall back to text. redraw
-	// wakes the update loop when an image finishes loading so it can pop in.
-	gfx    *kitty.Cache
-	redraw chan struct{}
+	// graphics protocol; nil elsewhere, where badges fall back to text.
+	gfx *kitty.Cache
 
-	incoming  <-chan chat.Message
-	modEvents <-chan chat.ModEvent
-	err       error
+	// onRedraw asks the host (the App) to re-render, so state changed off the UI
+	// goroutine — a new message, a loaded image, fresh stats — becomes visible.
+	onRedraw func()
+
+	// mu guards msgs, which the host's reader goroutines append to while the UI
+	// goroutine reads it to render.
+	mu  sync.Mutex
+	err error
 }
 
 type Options struct {
-	Channel  string
-	Incoming <-chan chat.Message
-	Emotes   *emote.Registry
-	Mod      Moderator
-	Info     InfoProvider
-	Clients  func() int
+	Channel string
+	Emotes  *emote.Registry
+	Mod     Moderator
+	Info    InfoProvider
+	Clients func() int
 
 	// Stats returns the channel's live viewer count, uptime and session average
 	// for the status bar. Leave nil to omit them.
@@ -86,9 +93,9 @@ type Options struct {
 	// session; the input line then shows a hint instead of a prompt.
 	Send func(string)
 
-	// ModEvents delivers moderation actions (deletions, timeouts, bans) so the
-	// TUI can strike through the affected messages. Optional.
-	ModEvents <-chan chat.ModEvent
+	// OnRedraw asks the host to re-render after Append/ApplyModEvent or an image
+	// load. Required for a hosted model; defaults to a no-op.
+	OnRedraw func()
 }
 
 func NewModel(o Options) *Model {
@@ -102,104 +109,54 @@ func NewModel(o Options) *Model {
 		ti.Focus()
 	}
 
+	onRedraw := o.OnRedraw
+	if onRedraw == nil {
+		onRedraw = func() {}
+	}
 	m := &Model{
-		channel:   o.Channel,
-		styles:    newStyles(),
-		emotes:    o.Emotes,
-		mod:       o.Mod,
-		info:      o.Info,
-		stats:     o.Stats,
-		clients:   o.Clients,
-		send:      o.Send,
-		input:     ti,
-		incoming:  o.Incoming,
-		modEvents: o.ModEvents,
-		redraw:    make(chan struct{}, 1),
+		channel:  o.Channel,
+		styles:   newStyles(),
+		emotes:   o.Emotes,
+		mod:      o.Mod,
+		info:     o.Info,
+		stats:    o.Stats,
+		clients:  o.Clients,
+		send:     o.Send,
+		input:    ti,
+		onRedraw: onRedraw,
 	}
 	if kitty.Supported() {
-		m.gfx = kitty.New(m.Redraw)
+		m.gfx = kitty.New(onRedraw)
 	}
 	return m
 }
 
-// Redraw wakes the update loop so the next View reflects state changed off the
-// UI goroutine — a just-loaded image, or fresh stream stats. It never blocks: a
-// full buffer already means a redraw is pending, which is what we want.
-func (m *Model) Redraw() {
-	select {
-	case m.redraw <- struct{}{}:
-	default:
-	}
+// Append adds a received message. It is safe to call from a reader goroutine
+// while the UI goroutine renders, and asks the host to redraw.
+func (m *Model) Append(msg chat.Message) {
+	m.mu.Lock()
+	m.appendLocked(msg)
+	m.mu.Unlock()
+	m.onRedraw()
 }
 
-// chatArrived carries one message from the IRC goroutine into the update loop.
-type chatArrived chat.Message
+// Redraw asks the host to re-render, for callers (the stats poller) that change
+// what the status bar shows without touching the message buffer.
+func (m *Model) Redraw() { m.onRedraw() }
 
-// streamClosed means the source hung up for good.
-type streamClosed struct{}
-
-// waitForChat blocks in a command goroutine until the next message arrives,
-// which is how a channel gets adapted into bubbletea's message loop.
-func waitForChat(ch <-chan chat.Message) tea.Cmd {
-	return func() tea.Msg {
-		m, ok := <-ch
-		if !ok {
-			return streamClosed{}
-		}
-		return chatArrived(m)
-	}
-}
-
-// redrawMsg wakes the update loop so a just-loaded image can be drawn.
-type redrawMsg struct{}
-
-// waitRedraw blocks until an image loads, turning the redraw channel into a
-// bubbletea command, the same adapter pattern as waitForChat.
-func waitRedraw(ch <-chan struct{}) tea.Cmd {
-	return func() tea.Msg {
-		<-ch
-		return redrawMsg{}
-	}
-}
-
-// modEventArrived carries a moderation action into the update loop.
-type modEventArrived chat.ModEvent
-
-func waitModEvent(ch <-chan chat.ModEvent) tea.Cmd {
-	return func() tea.Msg {
-		ev, ok := <-ch
-		if !ok {
-			return nil
-		}
-		return modEventArrived(ev)
-	}
-}
-
+// Init returns the model's startup command. Ingestion is driven by the host via
+// Append/ApplyModEvent, so the only command here is the input cursor's blink.
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{waitForChat(m.incoming)}
 	if m.send != nil {
-		cmds = append(cmds, textinput.Blink)
+		return textinput.Blink
 	}
-	// The redraw waiter is always active: both graphics and stats wake it.
-	cmds = append(cmds, waitRedraw(m.redraw))
-	if m.modEvents != nil {
-		cmds = append(cmds, waitModEvent(m.modEvents))
-	}
-	return tea.Batch(cmds...)
+	return nil
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		return m, nil
-
-	case chatArrived:
-		m.append(chat.Message(msg))
-		return m, waitForChat(m.incoming)
-
-	case streamClosed:
-		m.err = fmt.Errorf("chat connection closed")
 		return m, nil
 
 	case tea.KeyMsg:
@@ -223,14 +180,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.card.infoErr = msg.err
 		}
 		return m, nil
-
-	case redrawMsg:
-		// A View will run when we return; just re-arm the waiter.
-		return m, waitRedraw(m.redraw)
-
-	case modEventArrived:
-		m.applyModEvent(chat.ModEvent(msg))
-		return m, waitModEvent(m.modEvents)
 	}
 
 	// Non-key, non-mouse messages (the cursor's blink ticks) belong to the
@@ -243,7 +192,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) append(msg chat.Message) {
+// appendLocked adds a message; the caller holds m.mu.
+func (m *Model) appendLocked(msg chat.Message) {
 	m.msgs = append(m.msgs, msg)
 	if len(m.msgs) > historyLimit {
 		// Drop from the front in one slice op; copying keeps the backing array
@@ -258,10 +208,11 @@ func (m *Model) append(msg chat.Message) {
 	}
 }
 
-// applyModEvent strikes through the messages a moderation action affects.
+// ApplyModEvent strikes through the messages a moderation action affects.
 // Messages are kept, not removed, so a moderator can see what was deleted — the
-// same as Twitch's own moderator view.
-func (m *Model) applyModEvent(ev chat.ModEvent) {
+// same as Twitch's own moderator view. Safe to call from a reader goroutine.
+func (m *Model) ApplyModEvent(ev chat.ModEvent) {
+	m.mu.Lock()
 	for i := range m.msgs {
 		switch ev.Kind {
 		case chat.DeleteMessage:
@@ -276,6 +227,18 @@ func (m *Model) applyModEvent(ev chat.ModEvent) {
 			m.msgs[i].Deleted = true
 		}
 	}
+	m.mu.Unlock()
+	m.onRedraw()
+}
+
+// snapshot returns a copy of the message buffer taken under the lock, so the
+// renderer works from a stable slice while reader goroutines append.
+func (m *Model) snapshot() []chat.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]chat.Message, len(m.msgs))
+	copy(out, m.msgs)
+	return out
 }
 
 func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -416,7 +379,7 @@ func (m *Model) chatWidth() int {
 // out, which is cheap at this history size and avoids caching a number that
 // goes stale on every resize or card toggle.
 func (m *Model) maxScroll() int {
-	lines := layout(m.msgs, m.chatWidth(), m.styles, m.gfx)
+	lines := layout(m.snapshot(), m.chatWidth(), m.styles, m.gfx)
 	if n := len(lines) - m.viewportHeight(); n > 0 {
 		return n
 	}
@@ -428,7 +391,12 @@ func (m *Model) View() string {
 		return "" // no size yet; bubbletea sends one immediately
 	}
 
-	lines := layout(m.msgs, m.chatWidth(), m.styles, m.gfx)
+	// Render from a snapshot and keep it: hit boxes index into it, so a click
+	// resolves against exactly what was on screen even if the buffer has since
+	// grown or been trimmed. Both View and the click handler run on the UI
+	// goroutine, so lastRender needs no lock.
+	m.lastRender = m.snapshot()
+	lines := layout(m.lastRender, m.chatWidth(), m.styles, m.gfx)
 	vh := m.viewportHeight()
 
 	// Take the window ending `scroll` lines from the bottom.

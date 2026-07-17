@@ -26,6 +26,13 @@ type styles struct {
 
 	danger  lipgloss.Style
 	deleted lipgloss.Style
+
+	tabBar      lipgloss.Style
+	tabActive   lipgloss.Style
+	tabInactive lipgloss.Style
+
+	splashTitle lipgloss.Style
+	key         lipgloss.Style
 }
 
 func newStyles() *styles {
@@ -50,6 +57,13 @@ func newStyles() *styles {
 
 		danger:  lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true),
 		deleted: lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Strikethrough(true),
+
+		tabBar:      lipgloss.NewStyle().Background(lipgloss.Color("236")),
+		tabActive:   lipgloss.NewStyle().Background(lipgloss.Color("99")).Foreground(lipgloss.Color("231")).Bold(true),
+		tabInactive: lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("250")),
+
+		splashTitle: lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true),
+		key:         lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true),
 	}
 }
 

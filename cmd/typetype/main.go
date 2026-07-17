@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/Nyxnix/typetype/internal/auth"
 	"github.com/Nyxnix/typetype/internal/badge"
 	"github.com/Nyxnix/typetype/internal/chat"
+	"github.com/Nyxnix/typetype/internal/config"
 	"github.com/Nyxnix/typetype/internal/emote"
 	"github.com/Nyxnix/typetype/internal/ivr"
 	"github.com/Nyxnix/typetype/internal/overlay"
@@ -49,22 +51,29 @@ func main() {
 		}
 	}
 
-	channel := flag.String("channel", "", "Twitch channel to read (required)")
-	addr := flag.String("addr", "127.0.0.1:7788", "address for the overlay server")
-	headless := flag.Bool("headless", false, "serve the overlay without the terminal UI")
+	channel := flag.String("channel", "", "Twitch channel(s) to open, comma-separated; omit to start on the splash")
+	addr := flag.String("addr", "", "address for the overlay server (overrides the saved config)")
+	headless := flag.Bool("headless", false, "serve the overlay without the terminal UI (needs -channel)")
 	flag.Parse()
 
-	if *channel == "" {
-		usage()
+	var channels []string
+	for _, c := range strings.Split(*channel, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			channels = append(channels, strings.ToLower(strings.TrimPrefix(c, "#")))
+		}
+	}
+
+	if *headless && len(channels) == 0 {
+		fmt.Fprintln(os.Stderr, "typetype: -headless needs -channel")
 		os.Exit(2)
 	}
 
-	exit(run(ctx, *channel, *addr, *headless))
+	exit(run(ctx, channels, *addr, *headless))
 }
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  typetype -channel <name> [-addr host:port] [-headless]")
+	fmt.Fprintln(os.Stderr, "  typetype [-channel a,b,c] [-addr host:port] [-headless]")
 	fmt.Fprintln(os.Stderr, "  typetype login | logout | whoami")
 }
 
@@ -75,28 +84,104 @@ func exit(err error) {
 	}
 }
 
-func run(ctx context.Context, channel, addr string, headless bool) error {
-	// Resolve the login once, before starting the UI. A logged-in user reads as
-	// themselves, can send, and can moderate; everyone else reads anonymously and
-	// the UI explains the gaps.
-	session := loadSession(ctx)
-	mod := buildModerator(ctx, channel, session)
+func run(ctx context.Context, channels []string, addrFlag string, headless bool) error {
+	cfg := config.Load()
+	if addrFlag != "" {
+		cfg.OverlayAddr = addrFlag
+	}
 
+	// One overlay server for the whole app, pinned to a single channel so
+	// switching tabs never disrupts the stream.
 	ov := overlay.New()
-	srv := &http.Server{Addr: addr, Handler: ov.Handler()}
-	// Bind before starting the UI so a port clash is a plain error message
-	// rather than something that scrolls past behind a full-screen TUI.
-	ln, err := net.Listen("tcp", addr)
+	ln, err := net.Listen("tcp", cfg.OverlayAddr)
 	if err != nil {
 		return fmt.Errorf("overlay: %w", err)
 	}
+	srv := &http.Server{Handler: ov.Handler()}
 	go srv.Serve(ln)
 	defer srv.Close()
 
-	emotes := emote.New()
+	ovState := &overlayState{configured: strings.ToLower(cfg.OverlayChannel)}
 
-	// Badge images come from Helix, so they need the login; anonymous sessions
-	// get an empty registry that resolves nothing.
+	if headless {
+		return runHeadless(ctx, channels[0], cfg.OverlayAddr, ov, ovState)
+	}
+
+	// The factory opens a channel's connections and returns its chat model. It
+	// captures the App (assigned below) so each model's redraw wakes the App.
+	var app *tui.App
+	factory := func(channel string) (*tui.Model, func()) {
+		return openChannel(ctx, channel, ov, ovState, app.RequestRedraw)
+	}
+
+	session := loadSession(ctx)
+	login := ""
+	if session != nil {
+		login = session.Login
+	}
+	initial := channels
+	if len(initial) == 0 {
+		initial = cfg.Channels // reopen last session's channels
+	}
+
+	app = tui.NewApp(tui.AppOptions{
+		Factory:     factory,
+		Login:       login,
+		Config:      cfg,
+		Save:        func(c config.Config) { config.Save(c) },
+		Channels:    initial,
+		RequestCode: requestDeviceCode,
+		PollLogin:   pollLogin,
+		Logout:      func() { auth.Clear() },
+	})
+
+	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
+	_, err = p.Run()
+	return err
+}
+
+// overlayState tracks which channel currently feeds the overlay. Only one does,
+// so deleted/banned content is scoped and tab switching never disrupts it.
+type overlayState struct {
+	mu         sync.Mutex
+	configured string // channel the config pins the overlay to; "" = first opened
+	owner      string
+}
+
+// claim reports whether channel should publish to the overlay, taking ownership
+// if it is free and this channel is the configured one (or none is configured).
+func (o *overlayState) claim(channel string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.owner == channel {
+		return true
+	}
+	if o.owner == "" && (o.configured == "" || o.configured == channel) {
+		o.owner = channel
+		return true
+	}
+	return false
+}
+
+func (o *overlayState) release(channel string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.owner == channel {
+		o.owner = ""
+	}
+}
+
+// openChannel wires one channel's reader, sender, registries, stats and chat
+// model under a sub-context that its returned close func cancels.
+func openChannel(parent context.Context, channel string, ov *overlay.Server, ovState *overlayState, redraw func()) (*tui.Model, func()) {
+	ctx, cancel := context.WithCancel(parent)
+
+	// Reload the session per open, so a login completed on the splash applies to
+	// channels opened afterwards.
+	session := loadSession(ctx)
+	toOverlay := ovState.claim(channel)
+
+	emotes := emote.New()
 	var badgeToken string
 	if session != nil {
 		badgeToken = session.AccessToken
@@ -104,16 +189,8 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 	badges := badge.New(clientID(), badgeToken)
 
 	fromIRC := make(chan chat.Message, 256)
-	toTUI := make(chan chat.Message, 256)
-	modIRC := make(chan chat.ModEvent, 64) // deletions/timeouts/bans from the reader
-	toTUIMod := make(chan chat.ModEvent, 64)
+	modIRC := make(chan chat.ModEvent, 64)
 
-	// The reader is anonymous even when logged in. An authenticated connection
-	// never receives its own PRIVMSGs, so it would never see the user's own
-	// messages; an anonymous reader sees the whole channel, including the user's
-	// own messages with their real message id and badges — which is what makes
-	// the user's own messages deletable. ROOMSTATE arrives after JOIN and again
-	// on reconnect; load emotes and badges once.
 	var loadOnce sync.Once
 	reader := &twitch.Client{
 		Channel: channel,
@@ -136,105 +213,142 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 	}
 	go reader.Run(ctx)
 
-	// The sender is a separate authenticated connection used only to send; its
-	// own reads are ignored, since the reader above is the single source of
-	// truth for what appears in chat.
-	var sender *twitch.Client
+	var sendFn func(string)
 	if session != nil {
-		sender = &twitch.Client{
-			Channel: channel,
-			Nick:    session.Login,
-			Token:   session.AccessToken,
-			Out:     make(chan chat.Message, 16),
-		}
+		sender := &twitch.Client{Channel: channel, Nick: session.Login, Token: session.AccessToken, Out: make(chan chat.Message, 16)}
 		go sender.Run(ctx)
 		go func() {
-			for range sender.Out { // drain and discard
+			for range sender.Out {
 			}
 		}()
-	}
-
-	// Apply emotes and badges, then fan out to the overlay and the TUI.
-	go func() {
-		defer close(toTUI)
-		for m := range fromIRC {
-			emotes.Apply(&m)
-			badges.Resolve(&m)
-			ov.Publish(m)
-			select {
-			case toTUI <- m:
-			default: // ponytail: drop rather than stall the overlay if the UI lags
-			}
-		}
-	}()
-
-	// Fan moderation events to the overlay (which removes the messages, so
-	// deleted or banned content does not linger on stream) and the TUI (which
-	// strikes them through for the moderator).
-	go func() {
-		defer close(toTUIMod)
-		for ev := range modIRC {
-			ov.Remove(ev)
-			select {
-			case toTUIMod <- ev:
-			default:
-			}
-		}
-	}()
-
-	if headless {
-		log.Printf("overlay: http://%s", addr)
-		for range toTUI {
-		}
-		return nil
-	}
-
-	// The send path is present only when logged in, which is also what makes the
-	// TUI show its input line. A sent message appears in chat when the anonymous
-	// reader receives it back from Twitch, the same as any other message, so
-	// there is no local echo to reconcile.
-	var sendFn func(string)
-	if sender != nil {
 		sendFn = sender.Send
 	}
 
-	// Stream stats need a token; build the poller first so the model can read
-	// its snapshot, then wire OnUpdate to the model and start polling.
 	var poller *twitch.StreamPoller
 	var statsFn func() tui.StreamStats
 	if session != nil {
-		poller = &twitch.StreamPoller{
-			ClientID: clientID(),
-			Token:    session.AccessToken,
-			Login:    channel,
-			Interval: time.Minute,
-		}
+		poller = &twitch.StreamPoller{ClientID: clientID(), Token: session.AccessToken, Login: channel, Interval: time.Minute, OnUpdate: redraw}
 		statsFn = func() tui.StreamStats {
 			s := poller.Snapshot()
 			return tui.StreamStats{Live: s.Live, Viewers: s.Viewers, AvgViewers: s.AvgViewers, Uptime: s.Uptime}
 		}
-	}
-
-	model := tui.NewModel(tui.Options{
-		Channel:   channel,
-		Incoming:  toTUI,
-		ModEvents: toTUIMod,
-		Emotes:    emotes,
-		Clients:   ov.Clients,
-		Mod:       mod,
-		Info:      infoProvider{&ivr.Client{}},
-		Stats:     statsFn,
-		Send:      sendFn,
-	})
-
-	if poller != nil {
-		poller.OnUpdate = model.Redraw // set before Run, so no concurrent write
 		go poller.Run(ctx)
 	}
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
-	_, err = p.Run()
-	return err
+	var clientsFn func() int
+	if toOverlay {
+		clientsFn = ov.Clients
+	}
+
+	model := tui.NewModel(tui.Options{
+		Channel:  channel,
+		Emotes:   emotes,
+		Mod:      buildModerator(ctx, channel, session),
+		Info:     infoProvider{&ivr.Client{}},
+		Clients:  clientsFn,
+		Stats:    statsFn,
+		Send:     sendFn,
+		OnRedraw: redraw,
+	})
+
+	// Ingest chat: apply emotes/badges, publish to the overlay if this channel
+	// owns it, and append to the model.
+	go func() {
+		for m := range fromIRC {
+			emotes.Apply(&m)
+			badges.Resolve(&m)
+			if toOverlay {
+				ov.Publish(m)
+			}
+			model.Append(m)
+		}
+	}()
+	// Ingest moderation: remove from the overlay, strike through in the model.
+	go func() {
+		for ev := range modIRC {
+			if toOverlay {
+				ov.Remove(ev)
+			}
+			model.ApplyModEvent(ev)
+		}
+	}()
+
+	return model, func() {
+		cancel()
+		ovState.release(channel)
+	}
+}
+
+// runHeadless serves the overlay for one channel with no terminal UI.
+func runHeadless(ctx context.Context, channel, addr string, ov *overlay.Server, ovState *overlayState) error {
+	ovState.claim(channel)
+	emotes := emote.New()
+	session := loadSession(ctx)
+	var badgeToken string
+	if session != nil {
+		badgeToken = session.AccessToken
+	}
+	badges := badge.New(clientID(), badgeToken)
+
+	fromIRC := make(chan chat.Message, 256)
+	modIRC := make(chan chat.ModEvent, 64)
+	var loadOnce sync.Once
+	reader := &twitch.Client{
+		Channel: channel, Out: fromIRC, Events: modIRC,
+		OnRoomID: func(id string) {
+			loadOnce.Do(func() {
+				go emotes.Load(ctx, id)
+				go badges.Load(ctx, id)
+			})
+		},
+	}
+	go reader.Run(ctx)
+	go func() {
+		for ev := range modIRC {
+			ov.Remove(ev)
+		}
+	}()
+
+	log.Printf("overlay: http://%s", addr)
+	for m := range fromIRC {
+		emotes.Apply(&m)
+		badges.Resolve(&m)
+		ov.Publish(m)
+	}
+	return nil
+}
+
+// requestDeviceCode / pollLogin drive the splash's inline login through the
+// device flow. The handle is the device code carried between the two steps.
+func requestDeviceCode() (code, url string, handle any, err error) {
+	ac := &auth.Client{ClientID: clientID()}
+	dc, err := ac.RequestDeviceCode(context.Background())
+	if err != nil {
+		return "", "", nil, err
+	}
+	return dc.UserCode, dc.VerificationURI, dc, nil
+}
+
+func pollLogin(handle any) (login string, err error) {
+	dc, ok := handle.(*auth.DeviceCode)
+	if !ok {
+		return "", fmt.Errorf("bad login handle")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	ac := &auth.Client{ClientID: clientID()}
+	tok, err := ac.PollToken(ctx, dc)
+	if err != nil {
+		return "", err
+	}
+	id, name, err := twitch.Whoami(ctx, clientID(), tok.AccessToken, nil)
+	if err != nil {
+		return "", err
+	}
+	if err := auth.Save(&auth.StoredToken{Token: *tok, UserID: id, Login: name}); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // infoProvider adapts the IVR client to the TUI's InfoProvider interface,

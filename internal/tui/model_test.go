@@ -16,10 +16,10 @@ import (
 // in the buffer, then renders once so the hit map is populated.
 func newTestModel(t *testing.T, w, h int, msgs ...chat.Message) *Model {
 	t.Helper()
-	m := NewModel(Options{Channel: "buh", Incoming: make(chan chat.Message)})
+	m := NewModel(Options{Channel: "buh"})
 	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	for _, msg := range msgs {
-		m.append(msg)
+		m.Append(msg)
 	}
 	m.View() // View is what records hits
 	return m
@@ -198,8 +198,7 @@ func TestCardLayoutFitsAndIsStable(t *testing.T) {
 
 func TestStatusBarShowsStats(t *testing.T) {
 	m := NewModel(Options{
-		Channel:  "buh",
-		Incoming: make(chan chat.Message),
+		Channel: "buh",
 		Stats: func() StreamStats {
 			return StreamStats{Live: true, Viewers: 1234, AvgViewers: 1000, Uptime: 3*time.Hour + 24*time.Minute}
 		},
@@ -215,9 +214,8 @@ func TestStatusBarShowsStats(t *testing.T) {
 
 func TestStatusBarOffline(t *testing.T) {
 	m := NewModel(Options{
-		Channel:  "buh",
-		Incoming: make(chan chat.Message),
-		Stats:    func() StreamStats { return StreamStats{Live: false} },
+		Channel: "buh",
+		Stats:   func() StreamStats { return StreamStats{Live: false} },
 	})
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
 	if !strings.Contains(m.statusBar(), "offline") {
@@ -249,9 +247,9 @@ func (f *fakeInfo) CardInfo(_ context.Context, login, channel string) (UserInfo,
 
 func openCardWithInfo(t *testing.T, f *fakeInfo) *Model {
 	t.Helper()
-	m := NewModel(Options{Channel: "buh", Incoming: make(chan chat.Message), Info: f})
+	m := NewModel(Options{Channel: "buh", Info: f})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
-	m.append(chat.Message{ID: "m", AuthorID: "42", Author: "alice", AuthorLogin: "alice", Text: "hi"})
+	m.Append(chat.Message{ID: "m", AuthorID: "42", Author: "alice", AuthorLogin: "alice", Text: "hi"})
 	m.View()
 	_, cmd := m.Update(tea.MouseMsg{X: 7, Y: 0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
 	if m.card == nil {
@@ -360,9 +358,8 @@ func newSendModel(t *testing.T, w, h int) (*Model, *[]string) {
 	t.Helper()
 	var sent []string
 	m := NewModel(Options{
-		Channel:  "buh",
-		Incoming: make(chan chat.Message),
-		Send:     func(s string) { sent = append(sent, s) },
+		Channel: "buh",
+		Send:    func(s string) { sent = append(sent, s) },
 	})
 	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	m.View()
@@ -409,7 +406,7 @@ func TestSendSnapsToLive(t *testing.T) {
 	}
 	m, _ := newSendModel(t, 80, 12)
 	for _, msg := range msgs {
-		m.append(msg)
+		m.Append(msg)
 	}
 	m.scrollBy(5)
 	if m.scroll == 0 {
@@ -476,9 +473,9 @@ func (f *fakeMod) DeleteMessage(_ context.Context, id string) error {
 
 func openCardWithMod(t *testing.T, mod Moderator) (*Model, *card) {
 	t.Helper()
-	m := NewModel(Options{Channel: "buh", Incoming: make(chan chat.Message), Mod: mod})
+	m := NewModel(Options{Channel: "buh", Mod: mod})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
-	m.append(chat.Message{ID: "msg-1", AuthorID: "42", Author: "alice", AuthorLogin: "alice", Text: "hi"})
+	m.Append(chat.Message{ID: "msg-1", AuthorID: "42", Author: "alice", AuthorLogin: "alice", Text: "hi"})
 	m.View()
 	click(m, 7, 0)
 	if m.card == nil {
@@ -554,10 +551,10 @@ func TestDeleteTargetsTheClickedMessage(t *testing.T) {
 // deleted; pressing d must explain that rather than do nothing.
 func TestDeleteWithoutIDExplains(t *testing.T) {
 	f := &fakeMod{}
-	m := NewModel(Options{Channel: "buh", Incoming: make(chan chat.Message), Mod: f})
+	m := NewModel(Options{Channel: "buh", Mod: f})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
 	// No ID, as an echoed own-message has.
-	m.append(chat.Message{ID: "", AuthorID: "42", Author: "nyx", AuthorLogin: "nyx", Text: "buh"})
+	m.Append(chat.Message{ID: "", AuthorID: "42", Author: "nyx", AuthorLogin: "nyx", Text: "buh"})
 	m.View()
 	click(m, 7, 0)
 	if m.card == nil {
@@ -590,21 +587,21 @@ func TestApplyModEvents(t *testing.T) {
 
 	// Delete a single message by id.
 	m := fresh()
-	m.applyModEvent(chat.ModEvent{Kind: chat.DeleteMessage, MessageID: "m2"})
+	m.ApplyModEvent(chat.ModEvent{Kind: chat.DeleteMessage, MessageID: "m2"})
 	if !m.msgs[1].Deleted || m.msgs[0].Deleted || m.msgs[2].Deleted {
 		t.Errorf("delete by id hit the wrong messages: %v", deletedFlags(m))
 	}
 
 	// Clear a user: every message from that user id.
 	m = fresh()
-	m.applyModEvent(chat.ModEvent{Kind: chat.ClearUser, UserID: "1"})
+	m.ApplyModEvent(chat.ModEvent{Kind: chat.ClearUser, UserID: "1"})
 	if !m.msgs[0].Deleted || m.msgs[1].Deleted || !m.msgs[2].Deleted {
 		t.Errorf("clear user hit the wrong messages: %v", deletedFlags(m))
 	}
 
 	// Clear all.
 	m = fresh()
-	m.applyModEvent(chat.ModEvent{Kind: chat.ClearAll})
+	m.ApplyModEvent(chat.ModEvent{Kind: chat.ClearAll})
 	for i, msg := range m.msgs {
 		if !msg.Deleted {
 			t.Errorf("message %d not marked deleted on clear-all", i)
@@ -620,7 +617,7 @@ func TestApplyModEvents(t *testing.T) {
 // A deleted message renders struck through with a marker.
 func TestDeletedMessageRendered(t *testing.T) {
 	m := newTestModel(t, 80, 20, chat.Message{ID: "m1", AuthorID: "1", Author: "alice", Text: "oops"})
-	m.applyModEvent(chat.ModEvent{Kind: chat.DeleteMessage, MessageID: "m1"})
+	m.ApplyModEvent(chat.ModEvent{Kind: chat.DeleteMessage, MessageID: "m1"})
 	view := m.View()
 	if !strings.Contains(view, "deleted") {
 		t.Errorf("deleted message missing its marker:\n%s", view)
@@ -654,9 +651,9 @@ func TestCardHeaderShowsBadges(t *testing.T) {
 // Without a login there is nothing to moderate with; keys must not silently do
 // nothing, they must say why.
 func TestActionsWithoutLoginExplain(t *testing.T) {
-	m := NewModel(Options{Channel: "buh", Incoming: make(chan chat.Message)})
+	m := NewModel(Options{Channel: "buh"})
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
-	m.append(chat.Message{ID: "m", AuthorID: "42", Author: "alice", Text: "hi"})
+	m.Append(chat.Message{ID: "m", AuthorID: "42", Author: "alice", Text: "hi"})
 	m.View()
 	click(m, 7, 0)
 

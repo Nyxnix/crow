@@ -87,10 +87,10 @@ var timeoutPresets = []struct {
 // fetches their account detail, or nil if there is nothing to open or no info
 // provider is configured.
 func (m *Model) openCard(msgIdx int) tea.Cmd {
-	if msgIdx < 0 || msgIdx >= len(m.msgs) {
+	if msgIdx < 0 || msgIdx >= len(m.lastRender) {
 		return nil
 	}
-	src := m.msgs[msgIdx]
+	src := m.lastRender[msgIdx]
 	m.card = &card{
 		userID: src.AuthorID,
 		login:  src.AuthorLogin,
@@ -116,7 +116,7 @@ func (m *Model) openCard(msgIdx int) tea.Cmd {
 // historyLimit this scan is far too fast to matter.
 func (m *Model) userMessages(userID string) []chat.Message {
 	var out []chat.Message
-	for _, msg := range m.msgs {
+	for _, msg := range m.snapshot() {
 		if msg.AuthorID == userID {
 			out = append(out, msg)
 		}
