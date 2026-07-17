@@ -1,0 +1,346 @@
+// Package twitch connects to Twitch chat over IRC and converts what it reads
+// into chat.Message values.
+package twitch
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"fmt"
+	"math/rand"
+	"net"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Nyxnix/typetype/internal/chat"
+)
+
+const (
+	ircAddr    = "irc.chat.twitch.tv:6697"
+	emoteCDN   = "https://static-cdn.jtvnw.net/emoticons/v2/%s/default/dark/3.0"
+	writeLimit = 20 * time.Millisecond // Twitch drops clients that flood the socket
+)
+
+// Client reads one channel's chat. Zero Nick/Token means an anonymous
+// connection, which can read chat but not send or moderate.
+type Client struct {
+	Channel string
+	Nick    string
+	Token   string // OAuth token, without the "oauth:" prefix
+
+	// Out receives every parsed message. Run closes it on return.
+	Out chan chat.Message
+}
+
+// Run connects and pumps messages into Out until ctx is cancelled, reconnecting
+// with backoff whenever the connection drops. It only returns early if ctx ends.
+func (c *Client) Run(ctx context.Context) error {
+	defer close(c.Out)
+
+	backoff := time.Second
+	for {
+		err := c.session(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// Any session end that isn't a context cancel is a dropped connection.
+		// Back off so a persistent failure (bad token, Twitch down) doesn't spin.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+		_ = err
+	}
+}
+
+// session holds one connection open until it fails or ctx ends.
+func (c *Client) session(ctx context.Context) error {
+	d := &tls.Dialer{}
+	conn, err := d.DialContext(ctx, "tcp", ircAddr)
+	if err != nil {
+		return fmt.Errorf("dial: %w", err)
+	}
+	defer conn.Close()
+
+	// Cancelling ctx won't interrupt a blocked Read on its own, so close the
+	// socket out from under it, which makes the read fail and unwinds session.
+	go func() {
+		<-ctx.Done()
+		conn.Close()
+	}()
+
+	nick, pass := c.Nick, "oauth:"+c.Token
+	if c.Token == "" {
+		// justinfan<n> is Twitch's documented anonymous read-only login.
+		nick, pass = fmt.Sprintf("justinfan%d", 10000+rand.Intn(89999)), "SCHMOOPIIE"
+	}
+
+	// tags carries the metadata we render (color, badges, emotes); commands
+	// carries CLEARCHAT and friends, which we need for moderation feedback.
+	for _, line := range []string{
+		"CAP REQ :twitch.tv/tags twitch.tv/commands",
+		"PASS " + pass,
+		"NICK " + nick,
+		"JOIN #" + strings.ToLower(c.Channel),
+	} {
+		if _, err := conn.Write([]byte(line + "\r\n")); err != nil {
+			return fmt.Errorf("handshake: %w", err)
+		}
+		time.Sleep(writeLimit)
+	}
+
+	// Twitch lines cap at ~4KB of tags plus text; give the scanner room so a
+	// long message never truncates into an unparseable line.
+	sc := bufio.NewScanner(conn)
+	sc.Buffer(make([]byte, 0, 8192), 65536)
+
+	for sc.Scan() {
+		line, ok := parseLine(strings.TrimRight(sc.Text(), "\r"))
+		if !ok {
+			continue
+		}
+		switch line.cmd {
+		case "PING":
+			// Twitch pings every ~5min and disconnects if we don't echo it back.
+			if _, err := conn.Write([]byte("PONG :tmi.twitch.tv\r\n")); err != nil {
+				return err
+			}
+		case "PRIVMSG":
+			msg, ok := toMessage(line)
+			if !ok {
+				continue
+			}
+			select {
+			case c.Out <- msg:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+	return net.ErrClosed
+}
+
+// ircLine is one parsed IRC protocol line.
+type ircLine struct {
+	tags   map[string]string
+	nick   string
+	cmd    string
+	params []string
+}
+
+// parseLine splits an IRC line into tags, prefix, command and params. It
+// reports false for lines too malformed to act on.
+//
+// Shape: @tag=val;tag2=val2 :nick!user@host COMMAND param :trailing param
+func parseLine(raw string) (ircLine, bool) {
+	var l ircLine
+	s := raw
+
+	if strings.HasPrefix(s, "@") {
+		end := strings.IndexByte(s, ' ')
+		if end < 0 {
+			return l, false
+		}
+		l.tags = parseTags(s[1:end])
+		s = s[end+1:]
+	}
+
+	if strings.HasPrefix(s, ":") {
+		end := strings.IndexByte(s, ' ')
+		if end < 0 {
+			return l, false
+		}
+		prefix := s[1:end]
+		l.nick = prefix
+		if i := strings.IndexByte(prefix, '!'); i >= 0 {
+			l.nick = prefix[:i]
+		}
+		s = s[end+1:]
+	}
+
+	for s != "" {
+		// A param starting with ':' is the trailing param: it runs to end of
+		// line and may contain spaces, so stop splitting once we hit it.
+		if strings.HasPrefix(s, ":") {
+			l.params = append(l.params, s[1:])
+			break
+		}
+		end := strings.IndexByte(s, ' ')
+		if end < 0 {
+			l.params = append(l.params, s)
+			break
+		}
+		if end > 0 {
+			l.params = append(l.params, s[:end])
+		}
+		s = s[end+1:]
+	}
+
+	if len(l.params) == 0 {
+		return l, false
+	}
+	l.cmd, l.params = l.params[0], l.params[1:]
+	return l, true
+}
+
+// parseTags splits the IRCv3 tag string, unescaping each value.
+func parseTags(s string) map[string]string {
+	tags := make(map[string]string)
+	for _, kv := range strings.Split(s, ";") {
+		if kv == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(kv, "=")
+		tags[k] = unescapeTag(v)
+	}
+	return tags
+}
+
+// unescapeTag reverses IRCv3 tag escaping. The escape set is fixed by the spec:
+// anything else after a backslash is that literal character, and a trailing
+// lone backslash is dropped.
+func unescapeTag(v string) string {
+	if !strings.ContainsRune(v, '\\') {
+		return v
+	}
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if v[i] != '\\' {
+			b.WriteByte(v[i])
+			continue
+		}
+		i++
+		if i >= len(v) {
+			break
+		}
+		switch v[i] {
+		case ':':
+			b.WriteByte(';')
+		case 's':
+			b.WriteByte(' ')
+		case 'r':
+			b.WriteByte('\r')
+		case 'n':
+			b.WriteByte('\n')
+		default:
+			b.WriteByte(v[i])
+		}
+	}
+	return b.String()
+}
+
+// toMessage converts a PRIVMSG line into a chat.Message.
+func toMessage(l ircLine) (chat.Message, bool) {
+	if len(l.params) < 2 {
+		return chat.Message{}, false
+	}
+	channel := strings.TrimPrefix(l.params[0], "#")
+	text := l.params[1]
+
+	author := l.tags["display-name"]
+	if author == "" {
+		author = l.nick
+	}
+
+	badges := parseBadges(l.tags["badges"])
+	m := chat.Message{
+		ID:          l.tags["id"],
+		Platform:    chat.Twitch,
+		Channel:     channel,
+		AuthorID:    l.tags["user-id"],
+		Author:      author,
+		AuthorLogin: l.nick,
+		Color:       l.tags["color"],
+		Text:        text,
+		Emotes:      parseEmotes(l.tags["emotes"], text),
+		Badges:      badges,
+		At:          tagTime(l.tags["tmi-sent-ts"]),
+	}
+	for _, b := range badges {
+		switch b.Name {
+		case "broadcaster":
+			m.Broadcaster = true
+		case "moderator":
+			m.Moderator = true
+		case "vip":
+			m.VIP = true
+		case "subscriber", "founder":
+			m.Subscriber = true
+		}
+	}
+	return m, true
+}
+
+// parseBadges reads the badges tag: "broadcaster/1,subscriber/12".
+func parseBadges(tag string) []chat.Badge {
+	if tag == "" {
+		return nil
+	}
+	var out []chat.Badge
+	for _, b := range strings.Split(tag, ",") {
+		name, version, ok := strings.Cut(b, "/")
+		if !ok || name == "" {
+			continue
+		}
+		out = append(out, chat.Badge{Name: name, Version: version})
+	}
+	return out
+}
+
+// parseEmotes reads the emotes tag: "25:0-4,6-10/1902:12-16", where each range
+// is inclusive and indexes runes rather than bytes. The returned emotes use
+// exclusive ends, sorted by position so renderers can walk them in one pass.
+func parseEmotes(tag, text string) []chat.Emote {
+	if tag == "" {
+		return nil
+	}
+	runes := []rune(text)
+	var out []chat.Emote
+	for _, spec := range strings.Split(tag, "/") {
+		id, ranges, ok := strings.Cut(spec, ":")
+		if !ok {
+			continue
+		}
+		for _, r := range strings.Split(ranges, ",") {
+			lo, hi, ok := strings.Cut(r, "-")
+			if !ok {
+				continue
+			}
+			start, err1 := strconv.Atoi(lo)
+			end, err2 := strconv.Atoi(hi)
+			// Drop ranges that don't land inside the text rather than trusting
+			// them: a bad index here would panic the slice below.
+			if err1 != nil || err2 != nil || start < 0 || end < start || end >= len(runes) {
+				continue
+			}
+			out = append(out, chat.Emote{
+				Name:  string(runes[start : end+1]),
+				ID:    id,
+				URL:   fmt.Sprintf(emoteCDN, id),
+				Start: start,
+				End:   end + 1,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
+	return out
+}
+
+// tagTime reads tmi-sent-ts, which is Unix milliseconds. It falls back to now
+// so a message with a missing or junk timestamp still sorts sensibly.
+func tagTime(v string) time.Time {
+	ms, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return time.Now()
+	}
+	return time.UnixMilli(ms)
+}
