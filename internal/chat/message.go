@@ -28,6 +28,11 @@ type Emote struct {
 	// before it rather than taking its own space. Rendered inline it would look
 	// like an unrelated image sitting next to the one it belongs on.
 	ZeroWidth bool
+
+	// Animated marks an emote the provider serves as animated. The overlay uses
+	// URL (webp) either way; the TUI uses it to fetch the GIF directly instead of
+	// downloading the webp only to find it undecodable.
+	Animated bool
 }
 
 // Badge is a small image shown before the author's name (broadcaster, mod,

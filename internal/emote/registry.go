@@ -36,6 +36,7 @@ type Emote struct {
 	URL       string
 	Provider  Provider
 	ZeroWidth bool
+	Animated  bool // the provider marks it animated, so the TUI can fetch its GIF directly
 }
 
 // Registry maps emote names to images for one channel.
@@ -182,6 +183,7 @@ func (r *Registry) Apply(m *chat.Message) {
 					Start:     i,
 					End:       j,
 					ZeroWidth: e.ZeroWidth,
+					Animated:  e.Animated,
 				})
 			}
 		}
@@ -242,8 +244,9 @@ type sevenTVHost struct {
 }
 
 type sevenTVData struct {
-	Flags int         `json:"flags"`
-	Host  sevenTVHost `json:"host"`
+	Flags    int         `json:"flags"`
+	Animated bool        `json:"animated"`
+	Host     sevenTVHost `json:"host"`
 }
 
 type sevenTVEmote struct {
@@ -270,6 +273,7 @@ func (s sevenTVSet) toEmotes() []Emote {
 			URL:       "https:" + e.Data.Host.URL + "/" + file,
 			Provider:  SevenTV,
 			ZeroWidth: e.Data.Flags&sevenTVZeroWidth != 0,
+			Animated:  e.Data.Animated,
 		})
 	}
 	return out
@@ -316,6 +320,7 @@ type bttvEmote struct {
 	ID        string `json:"id"`
 	Code      string `json:"code"`
 	ImageType string `json:"imageType"`
+	Animated  bool   `json:"animated"`
 }
 
 func (e bttvEmote) toEmote() Emote {
@@ -324,6 +329,7 @@ func (e bttvEmote) toEmote() Emote {
 		ID:       e.ID,
 		URL:      "https://cdn.betterttv.net/emote/" + e.ID + "/3x." + e.ImageType,
 		Provider: BTTV,
+		Animated: e.Animated,
 	}
 }
 

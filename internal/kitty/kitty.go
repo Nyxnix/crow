@@ -217,41 +217,59 @@ func (c *Cache) fetch(url string) (decoded, error) {
 	return decoded{frames: [][]byte{buf.Bytes()}, delays: []int{0}, cols: cellsWide(img.Bounds().Dx(), img.Bounds().Dy())}, nil
 }
 
+// AnimatedURL maps a WebP emote URL to the small GIF the TUI animates. Callers
+// that already know an emote is animated pass this to Render so the cache never
+// downloads the undecodable WebP first. Returns url unchanged if it isn't a WebP.
+func AnimatedURL(url string) string {
+	if alt := gifAlternative(url); alt != "" {
+		return alt
+	}
+	return url
+}
+
 // gifAlternative maps a WebP emote URL to its GIF sibling, or "" if not a WebP.
-// It also steps the size down: an animated emote shows at about two cells, so
-// the 4x source used for the overlay would upload many megabytes of frames for
-// no visible gain — 2x is plenty.
+// It also steps the size down to 1x: an animated emote displays at about two
+// cells (~34px), so 1x (32px) is already native resolution — the 4x source the
+// overlay uses would upload roughly sixteen times the data per frame, decode
+// far slower, and look no crisper. This is what keeps a 158-frame emote from
+// taking a second or more to appear.
 func gifAlternative(url string) string {
 	if !strings.HasSuffix(url, ".webp") {
 		return ""
 	}
 	u := strings.TrimSuffix(url, ".webp") + ".gif"
-	u = strings.Replace(u, "/4x.gif", "/2x.gif", 1)
-	u = strings.Replace(u, "/3x.gif", "/2x.gif", 1)
+	for _, sz := range []string{"/4x.gif", "/3x.gif", "/2x.gif"} {
+		u = strings.Replace(u, sz, "/1x.gif", 1)
+	}
 	return u
 }
 
-// decodeGIF composites each GIF frame onto a full canvas (frames may be partial
-// regions) and PNG-encodes it, returning per-frame delays in milliseconds.
+// decodeGIF composites each GIF frame into a full image, honoring the per-frame
+// disposal method, and PNG-encodes each. Without disposal handling, a frame's
+// transparent areas would let earlier frames show through, smearing an emote
+// with a transparent background into an unrecognizable blur.
 func decodeGIF(raw []byte) (decoded, error) {
 	g, err := gif.DecodeAll(bytes.NewReader(raw))
 	if err != nil || len(g.Image) == 0 {
 		return decoded{}, fmt.Errorf("gif: %v", err)
 	}
-	b := g.Image[0].Bounds()
-	if len(g.Image) > 1 {
-		// Later frames may extend the first; size to the logical screen.
-		b = image.Rect(0, 0, g.Config.Width, g.Config.Height)
+	bounds := image.Rect(0, 0, g.Config.Width, g.Config.Height)
+	if bounds.Empty() {
+		bounds = g.Image[0].Bounds()
 	}
-	canvas := image.NewRGBA(b)
+	canvas := image.NewRGBA(bounds)
 
-	out := decoded{cols: cellsWide(b.Dx(), b.Dy())}
+	out := decoded{cols: cellsWide(bounds.Dx(), bounds.Dy())}
 	for i, frame := range g.Image {
+		var saved *image.RGBA
+		if g.Disposal[i] == gif.DisposalPrevious {
+			saved = cloneRGBA(canvas)
+		}
+
 		draw.Draw(canvas, frame.Bounds(), frame, frame.Bounds().Min, draw.Over)
+
 		var buf bytes.Buffer
-		snap := image.NewRGBA(canvas.Bounds())
-		copy(snap.Pix, canvas.Pix)
-		if err := png.Encode(&buf, snap); err != nil {
+		if err := png.Encode(&buf, cloneRGBA(canvas)); err != nil {
 			return decoded{}, err
 		}
 		out.frames = append(out.frames, buf.Bytes())
@@ -260,8 +278,57 @@ func decodeGIF(raw []byte) (decoded, error) {
 			ms = 100
 		}
 		out.delays = append(out.delays, ms)
+
+		// Prepare the canvas for the next frame according to disposal.
+		switch g.Disposal[i] {
+		case gif.DisposalBackground:
+			// Clear this frame's region back to transparent.
+			draw.Draw(canvas, frame.Bounds(), image.Transparent, image.Point{}, draw.Src)
+		case gif.DisposalPrevious:
+			if saved != nil {
+				copy(canvas.Pix, saved.Pix)
+			}
+		}
+		// DisposalNone (and unspecified 0): leave the frame in place.
 	}
-	return out, nil
+	return subsample(out, maxFrames), nil
+}
+
+// maxFrames caps how many frames an animation uploads. Set high enough that a
+// normal emote (catJAM is 158 frames) keeps its full framerate; the cap only
+// trims a pathologically long animation so it can't upload tens of megabytes.
+const maxFrames = 300
+
+// subsample thins an animation to at most max frames, spread evenly across the
+// loop, folding the delays of dropped frames into the kept frame before them so
+// the loop keeps its original total duration. Even spacing (rather than a fixed
+// step) avoids halving a 100-frame emote just because it is one over the cap.
+func subsample(d decoded, max int) decoded {
+	n := len(d.frames)
+	if n <= max {
+		return d
+	}
+	out := decoded{cols: d.cols, frames: make([][]byte, 0, max), delays: make([]int, 0, max)}
+	prev := 0
+	for k := 0; k < max; k++ {
+		idx := k * n / max
+		next := (k + 1) * n / max
+		sum := 0
+		for j := prev; j < next; j++ {
+			sum += d.delays[j]
+		}
+		out.frames = append(out.frames, d.frames[idx])
+		out.delays = append(out.delays, sum)
+		prev = next
+	}
+	return out
+}
+
+// cloneRGBA returns an independent copy of an RGBA image.
+func cloneRGBA(src *image.RGBA) *image.RGBA {
+	dst := image.NewRGBA(src.Bounds())
+	copy(dst.Pix, src.Pix)
+	return dst
 }
 
 // cellsWide picks a cell width that preserves the image's aspect ratio at a
@@ -288,24 +355,33 @@ func cellsWide(w, h int) int {
 // with a=a. A terminal that ignores the animation controls simply shows the
 // first frame, so this degrades to a static image.
 func writeUpload(b *strings.Builder, e *entry) {
-	// Root frame with the placement.
-	writeChunked(b, fmt.Sprintf("a=T,U=1,i=%d,f=100,c=%d,r=1,q=2", e.id, e.cols), e.frames[0])
+	// Root frame with the placement (continuations of an upload need only m=).
+	writeChunked(b, fmt.Sprintf("a=T,U=1,i=%d,f=100,c=%d,r=1,q=2", e.id, e.cols), "", e.frames[0])
 
 	if len(e.frames) <= 1 {
 		return
 	}
-	// Additional frames: z is this frame's display time in ms.
+	// Additional frames. X=1 is replace composition: without it, kitty
+	// alpha-blends each frame onto the previous, so transparent emote frames
+	// accumulate into a smear. z is this frame's display time. Continuation
+	// chunks of a frame must repeat a=f — the one detail that, when missing,
+	// left multi-chunk frames silently ignored and the emote static.
 	for i := 1; i < len(e.frames); i++ {
-		writeChunked(b, fmt.Sprintf("a=f,i=%d,f=100,z=%d,q=2", e.id, e.delays[i]), e.frames[i])
+		first := fmt.Sprintf("a=f,i=%d,f=100,X=1,z=%d,q=2", e.id, e.delays[i])
+		cont := fmt.Sprintf("a=f,i=%d,q=2", e.id)
+		writeChunked(b, first, cont, e.frames[i])
 	}
-	// Set the first frame's gap and start looping playback.
+	// Give the root frame its gap, then run with an infinite loop (v=1; v=0 is
+	// "ignored", which plays once and stops on the last frame).
 	fmt.Fprintf(b, "\x1b_Ga=a,i=%d,r=1,z=%d,q=2\x1b\\", e.id, e.delays[0])
-	fmt.Fprintf(b, "\x1b_Ga=a,i=%d,s=3,v=0,q=2\x1b\\", e.id)
+	fmt.Fprintf(b, "\x1b_Ga=a,i=%d,s=3,v=1,q=2\x1b\\", e.id)
 }
 
-// writeChunked emits one graphics command with the given control keys, its
-// base64 payload split into the protocol's 4096-byte chunks.
-func writeChunked(b *strings.Builder, control string, payload []byte) {
+// writeChunked emits one graphics command, its base64 payload split into the
+// protocol's 4096-byte chunks. The first chunk carries firstControl; each
+// continuation carries contControl (empty means just the m= key, which is what
+// a=t/a=T uploads use — but a=f frames must repeat their action on every chunk).
+func writeChunked(b *strings.Builder, firstControl, contControl string, payload []byte) {
 	data := base64.StdEncoding.EncodeToString(payload)
 	const chunk = 4096
 	first := true
@@ -317,10 +393,13 @@ func writeChunked(b *strings.Builder, control string, payload []byte) {
 		if len(data) > 0 {
 			more = 1
 		}
-		if first {
-			fmt.Fprintf(b, "\x1b_G%s,m=%d;%s\x1b\\", control, more, part)
+		switch {
+		case first:
+			fmt.Fprintf(b, "\x1b_G%s,m=%d;%s\x1b\\", firstControl, more, part)
 			first = false
-		} else {
+		case contControl != "":
+			fmt.Fprintf(b, "\x1b_G%s,m=%d;%s\x1b\\", contControl, more, part)
+		default:
 			fmt.Fprintf(b, "\x1b_Gm=%d;%s\x1b\\", more, part)
 		}
 	}

@@ -198,7 +198,13 @@ func layoutBodyEmotes(m chat.Message, firstW, restW int, style *styles, gfx *kit
 	rendered := make([]renderedToken, 0, len(tokens))
 	for _, t := range tokens {
 		if t.emote != nil && t.emote.URL != "" {
-			if img, cols, ok := gfx.Render(t.emote.URL); ok {
+			// For an animated emote, fetch the GIF straight away; the WebP the
+			// registry supplies (for the overlay) is not decodable here.
+			url := t.emote.URL
+			if t.emote.Animated {
+				url = kitty.AnimatedURL(url)
+			}
+			if img, cols, ok := gfx.Render(url); ok {
 				rendered = append(rendered, renderedToken{str: img, w: cols})
 				continue
 			}

@@ -122,6 +122,71 @@ func TestCellsWideByAspect(t *testing.T) {
 	}
 }
 
+// The bug that cost the most: a frame split across chunks must repeat its a=f
+// action on every continuation chunk, or the terminal silently drops the frame
+// and the emote never animates.
+func TestWriteChunkedRepeatsContinuationControl(t *testing.T) {
+	var b strings.Builder
+	big := make([]byte, 7000) // > 4096 base64-chunk, so it splits
+	writeChunked(&b, "a=f,i=5,z=40", "a=f,i=5", big)
+	out := b.String()
+
+	// Two chunks: first with the full control, the continuation repeating a=f.
+	if n := strings.Count(out, "\x1b_Ga=f,i=5,z=40,m=1;"); n != 1 {
+		t.Errorf("first chunk = %d, want one with the full control", n)
+	}
+	if !strings.Contains(out, "\x1b_Ga=f,i=5,m=0;") {
+		t.Errorf("continuation chunk did not repeat a=f:\n%q", out)
+	}
+	if strings.Contains(out, "\x1b_Gm=") {
+		t.Error("a=f continuation fell back to a bare m= chunk, which the terminal drops")
+	}
+}
+
+// An upload continuation (a=T/a=t) needs only m=, not the action repeated.
+func TestWriteChunkedUploadContinuation(t *testing.T) {
+	var b strings.Builder
+	writeChunked(&b, "a=T,i=1", "", make([]byte, 7000))
+	if !strings.Contains(b.String(), "\x1b_Gm=0;") {
+		t.Error("upload continuation should be a bare m= chunk")
+	}
+}
+
+func TestSubsampleKeepsDurationAndCap(t *testing.T) {
+	d := decoded{cols: 2}
+	for i := 0; i < 100; i++ {
+		d.frames = append(d.frames, []byte{byte(i)})
+		d.delays = append(d.delays, 40)
+	}
+	out := subsample(d, 24)
+	if len(out.frames) != 24 {
+		t.Errorf("got %d frames, want 24", len(out.frames))
+	}
+	total := 0
+	for _, ms := range out.delays {
+		total += ms
+	}
+	if total != 100*40 {
+		t.Errorf("total duration = %dms, want the original %dms preserved", total, 100*40)
+	}
+	// Under the cap, frames are untouched.
+	small := decoded{frames: make([][]byte, 10), delays: make([]int, 10)}
+	if got := subsample(small, 24); len(got.frames) != 10 {
+		t.Errorf("under-cap animation changed from 10 to %d", len(got.frames))
+	}
+}
+
+func TestAnimatedURL(t *testing.T) {
+	got := AnimatedURL("https://cdn.7tv.app/emote/ABC/4x.webp")
+	if got != "https://cdn.7tv.app/emote/ABC/1x.gif" {
+		t.Errorf("got %q, want the 1x gif", got)
+	}
+	// A non-webp URL is returned unchanged.
+	if got := AnimatedURL("https://cdn/badge.png"); got != "https://cdn/badge.png" {
+		t.Errorf("non-webp url changed: %q", got)
+	}
+}
+
 func TestFailedFetchStaysNotReady(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
