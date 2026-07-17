@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TypeType overlay</title>
+<style>
+  :root {
+    --size: 20px;
+    --stroke: 2px;
+    --shadow: rgba(0, 0, 0, 0.8);
+    --gap: 6px;
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    /* A browser source composites over video: the page must not paint a
+       background of its own, and must never show scrollbars. */
+    background: transparent;
+    overflow: hidden;
+  }
+
+  #chat {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end; /* newest at the bottom, older pushed up and out */
+    height: 100%;
+    padding: 8px;
+    box-sizing: border-box;
+    gap: var(--gap);
+
+    font-family: var(--font, "Inter", "Segoe UI", system-ui, sans-serif);
+    font-size: var(--size);
+    font-weight: 700;
+    line-height: 1.32;
+    color: #fff;
+    /* Outline keeps text legible over arbitrary video underneath. Four offsets
+       approximate a stroke far more cheaply than -webkit-text-stroke, which
+       thins glyphs at small sizes. */
+    text-shadow:
+      var(--stroke) 0 var(--shadow), calc(-1 * var(--stroke)) 0 var(--shadow),
+      0 var(--stroke) var(--shadow), 0 calc(-1 * var(--stroke)) var(--shadow),
+      var(--stroke) var(--stroke) var(--shadow), calc(-1 * var(--stroke)) calc(-1 * var(--stroke)) var(--shadow),
+      var(--stroke) calc(-1 * var(--stroke)) var(--shadow), calc(-1 * var(--stroke)) var(--stroke) var(--shadow);
+  }
+
+  #chat.top { justify-content: flex-start; }
+
+  .msg {
+    /* Long words and pasted URLs must wrap rather than widen the source. */
+    overflow-wrap: anywhere;
+    transition: opacity 0.5s ease-out;
+  }
+
+  .msg.animate {
+    animation: enter 0.22s ease-out;
+  }
+
+  @keyframes enter {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .msg.faded { opacity: 0; }
+
+  .name {
+    /* Twitch colors are chosen against a dark UI and some are near-black, so
+       the outline above is what keeps them readable here. */
+    color: var(--name-color, #fff);
+  }
+
+  .colon { margin-right: 0.28em; }
+
+  .badge, .emote {
+    display: inline-block;
+    vertical-align: middle;
+  }
+
+  .badge {
+    height: 0.82em;
+    margin-right: 0.22em;
+    /* Badges are flat art; the text outline would smear them. */
+    filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.6));
+  }
+
+  .emote {
+    /* Slightly taller than the line so emotes read as emotes, matching the
+       proportions Twitch itself uses. */
+    height: 1.5em;
+    margin: -0.25em 0.04em;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .msg.animate { animation: none; }
+  }
+</style>
+</head>
+<body>
+<div id="chat"></div>
+<script>
+(() => {
+  "use strict";
+
+  const q = new URLSearchParams(location.search);
+  const bool = (k, dflt) => q.has(k) ? !/^(0|false|no|off)$/i.test(q.get(k)) : dflt;
+  const num  = (k, dflt) => { const n = parseFloat(q.get(k)); return Number.isFinite(n) ? n : dflt; };
+
+  const FONTS = [
+    '"Inter", "Segoe UI", system-ui, sans-serif',
+    '"Roboto", system-ui, sans-serif',
+    'system-ui, sans-serif',
+    '"Comic Sans MS", "Comic Neue", cursive',
+    'ui-monospace, "Cascadia Code", "Fira Code", monospace',
+  ];
+
+  const cfg = {
+    fade:      num("fade", 0),           // seconds before a message fades; 0 = never
+    animate:   bool("animate", true),
+    size:      num("size", 20),          // px
+    stroke:    num("stroke", 2),         // px of outline
+    font:      FONTS[num("font", 0)] || FONTS[0],
+    badges:    bool("badges", true),
+    hideCmds:  bool("hide_commands", false),
+    align:     q.get("align") === "top" ? "top" : "bottom",
+    // Cap the DOM. A browser source left running for a nine-hour stream would
+    // otherwise accumulate every message ever sent.
+    max:       Math.max(1, num("max", 50)),
+    bots:      new Set((q.get("bots") || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean)),
+  };
+
+  const root = document.documentElement;
+  root.style.setProperty("--size", cfg.size + "px");
+  root.style.setProperty("--stroke", cfg.stroke + "px");
+  root.style.setProperty("--font", cfg.font);
+
+  const chat = document.getElementById("chat");
+  if (cfg.align === "top") chat.classList.add("top");
+
+  // Twitch's own fallback palette, used for chatters who never picked a color.
+  // Hashing the name keeps a given person the same color across reconnects.
+  const PALETTE = [
+    "#FF0000", "#0000FF", "#00FF00", "#B22222", "#FF7F50", "#9ACD32",
+    "#FF4500", "#2E8B57", "#DAA520", "#D2691E", "#5F9EA0", "#1E90FF",
+    "#FF69B4", "#8A2BE2", "#00FF7F",
+  ];
+  function colorFor(name, given) {
+    if (given) return given;
+    let h = 0;
+    for (const ch of name) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
+
+  // Emote offsets index code points, not UTF-16 units, so the text must be
+  // split with Array.from. Indexing a JS string directly would misplace every
+  // emote in a message containing astral characters or CJK.
+  function renderBody(text, emotes) {
+    const frag = document.createDocumentFragment();
+    const runes = Array.from(text);
+    const sorted = (emotes || []).slice().sort((a, b) => a.start - b.start);
+
+    let at = 0;
+    for (const e of sorted) {
+      if (e.start < at || e.end > runes.length) continue; // overlapping or stale range
+      if (e.start > at) frag.append(runes.slice(at, e.start).join(""));
+      const img = document.createElement("img");
+      img.className = "emote";
+      img.src = e.url;
+      img.alt = e.name;
+      img.title = e.name;
+      frag.append(img);
+      at = e.end;
+    }
+    if (at < runes.length) frag.append(runes.slice(at).join(""));
+    return frag;
+  }
+
+  function addMessage(m) {
+    const login = (m.author || "").toLowerCase();
+    if (cfg.bots.has(login)) return;
+    if (cfg.hideCmds && m.text.startsWith("!")) return;
+
+    const el = document.createElement("div");
+    el.className = "msg" + (cfg.animate ? " animate" : "");
+
+    if (cfg.badges) {
+      for (const b of m.badges || []) {
+        const img = document.createElement("img");
+        img.className = "badge";
+        img.src = b.url;
+        img.alt = b.name;
+        el.append(img);
+      }
+    }
+
+    const name = document.createElement("span");
+    name.className = "name";
+    name.style.setProperty("--name-color", colorFor(m.author, m.color));
+    // textContent, not innerHTML: chat is untrusted input and this page runs
+    // inside OBS's browser engine.
+    name.textContent = m.author;
+    el.append(name);
+
+    const colon = document.createElement("span");
+    colon.className = "colon";
+    colon.textContent = ":";
+    el.append(colon);
+
+    el.append(renderBody(m.text, m.emotes));
+    chat.append(el);
+
+    while (chat.children.length > cfg.max) chat.firstChild.remove();
+
+    if (cfg.fade > 0) {
+      setTimeout(() => {
+        el.classList.add("faded");
+        // Drop it once the opacity transition has finished, so a faded message
+        // stops costing layout on every subsequent append.
+        setTimeout(() => el.remove(), 600);
+      }, cfg.fade * 1000);
+    }
+  }
+
+  // EventSource reconnects on its own, which is what makes an OBS browser
+  // source survive a TypeType restart without anyone touching OBS.
+  const es = new EventSource("/events");
+  es.onmessage = (ev) => {
+    try {
+      addMessage(JSON.parse(ev.data));
+    } catch (err) {
+      console.error("typetype: bad message", err);
+    }
+  };
+})();
+</script>
+</body>
+</html>
