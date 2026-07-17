@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Nyxnix/typetype/internal/auth"
+	"github.com/Nyxnix/typetype/internal/badge"
 	"github.com/Nyxnix/typetype/internal/chat"
 	"github.com/Nyxnix/typetype/internal/emote"
 	"github.com/Nyxnix/typetype/internal/overlay"
@@ -93,6 +94,14 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 
 	emotes := emote.New()
 
+	// Badge images come from Helix, so they need the login; anonymous sessions
+	// get an empty registry that resolves nothing.
+	var badgeToken string
+	if session != nil {
+		badgeToken = session.AccessToken
+	}
+	badges := badge.New(clientID(), badgeToken)
+
 	// Messages are fanned out here: the overlay needs every message, and so does
 	// the TUI, but they consume at different rates.
 	fromIRC := make(chan chat.Message, 256)
@@ -109,6 +118,11 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 				go func() {
 					if err := emotes.Load(ctx, id); err != nil {
 						log.Printf("emotes: %v", err)
+					}
+				}()
+				go func() {
+					if err := badges.Load(ctx, id); err != nil {
+						log.Printf("badges: %v", err)
 					}
 				}()
 			})
@@ -139,6 +153,7 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 			case m = <-echoCh:
 			}
 			emotes.Apply(&m)
+			badges.Resolve(&m)
 			ov.Publish(m)
 			select {
 			case toTUI <- m:
