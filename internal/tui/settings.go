@@ -12,15 +12,21 @@ import (
 	"github.com/Nyxnix/typetype/internal/config"
 )
 
+// The two settings pages: a short top menu, and the overlay sub-menu.
+const (
+	pageMain = iota
+	pageOverlay
+)
+
 // fontNames labels the overlay's font list, index-matched to the FONTS array in
 // overlay.html.
 var fontNames = []string{"Inter", "Roboto", "System", "Comic Sans", "Monospace"}
 
-// srow is one configurable line on the settings screen. Exactly one of the
-// value fields is set, which decides how the row renders and what a keypress on
-// it does: text edits an input, boolp toggles, enump cycles a fixed list, and
-// display is a read-only value (the overlay URL). The lone "log out" row has
-// none set and is matched by label.
+// srow is one line on a settings page. Exactly one behavior field is set, which
+// decides how the row renders and what a keypress on it does: text edits an
+// input, boolp toggles, enump cycles a fixed list, display is a read-only value
+// (the overlay URL), and open navigates to another page. The "log out" row sets
+// none and is matched by label.
 type srow struct {
 	label string
 
@@ -33,6 +39,8 @@ type srow struct {
 	enumOpts []string
 
 	display func() string // read-only value
+
+	open int // page to jump to on enter; 0 (pageMain) means "not a link"
 }
 
 // settingsState is the Ctrl+S configuration screen. It binds its rows directly
@@ -41,8 +49,9 @@ type srow struct {
 type settingsState struct {
 	login    string
 	cfg      *config.Config
-	rows     []*srow
-	sel      int
+	page     int
+	rows     [2][]*srow
+	sel      [2]int
 	alignIdx *int // heap-backed so it survives this value being copied on return
 }
 
@@ -81,7 +90,14 @@ func newSettingsState(login string, cfg *config.Config) settingsState {
 		*alignIdx = 1
 	}
 
-	rows := []*srow{
+	main := []*srow{
+		{label: "overlay settings", open: pageOverlay},
+	}
+	if login != "" {
+		main = append(main, &srow{label: "log out"})
+	}
+
+	overlay := []*srow{
 		{label: "overlay", boolp: &cfg.OverlayEnabled},
 		{label: "address", ti: addr, commit: func(s string) { cfg.OverlayAddr = strings.TrimSpace(s) }},
 		{label: "channel", ti: channel, commit: func(s string) { cfg.OverlayChannel = strings.TrimSpace(s) }},
@@ -97,21 +113,28 @@ func newSettingsState(login string, cfg *config.Config) settingsState {
 		{label: "hide bots (csv)", ti: bots, commit: func(s string) { o.Bots = strings.TrimSpace(s) }},
 		{label: "overlay url", display: cfg.OverlayURL},
 	}
-	if login != "" {
-		rows = append(rows, &srow{label: "log out"})
-	}
 
-	st := settingsState{login: login, cfg: cfg, rows: rows, alignIdx: alignIdx}
+	st := settingsState{login: login, cfg: cfg, alignIdx: alignIdx}
+	st.rows[pageMain] = main
+	st.rows[pageOverlay] = overlay
 	st.refocus()
 	return st
 }
 
 func (a *App) settingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	st := &a.settings
-	cur := st.rows[st.sel]
+	rows := st.rows[st.page]
+	sel := &st.sel[st.page]
+	cur := rows[*sel]
 
 	switch msg.String() {
 	case "esc":
+		// From a sub-page, back out to the top menu; from the top, save & close.
+		if st.page != pageMain {
+			st.page = pageMain
+			st.refocus()
+			return a, nil
+		}
 		st.save(a)
 		if len(a.tabs) > 0 {
 			a.mode = modeChat
@@ -121,11 +144,11 @@ func (a *App) settingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case "up", "shift+tab":
-		st.sel = (st.sel - 1 + len(st.rows)) % len(st.rows)
+		*sel = (*sel - 1 + len(rows)) % len(rows)
 		st.refocus()
 		return a, nil
 	case "down", "tab":
-		st.sel = (st.sel + 1) % len(st.rows)
+		*sel = (*sel + 1) % len(rows)
 		st.refocus()
 		return a, nil
 
@@ -142,6 +165,9 @@ func (a *App) settingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "enter", " ":
 		switch {
+		case cur.open != pageMain:
+			st.page = cur.open
+			st.refocus()
 		case cur.boolp != nil:
 			*cur.boolp = !*cur.boolp
 		case cur.enump != nil:
@@ -150,9 +176,9 @@ func (a *App) settingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.logout()
 			a.login = ""
 			st.login = ""
-			st.rows = st.rows[:len(st.rows)-1] // drop the logout row
-			if st.sel >= len(st.rows) {
-				st.sel = len(st.rows) - 1
+			st.rows[pageMain] = st.rows[pageMain][:len(st.rows[pageMain])-1] // drop logout row
+			if *sel >= len(st.rows[pageMain]) {
+				*sel = len(st.rows[pageMain]) - 1
 			}
 			st.refocus()
 		}
@@ -171,9 +197,11 @@ func (a *App) settingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // save commits every text row into the config, writes back the align enum, and
 // persists.
 func (s *settingsState) save(a *App) {
-	for _, r := range s.rows {
-		if r.ti != nil && r.commit != nil {
-			r.commit(r.ti.Value())
+	for _, page := range s.rows {
+		for _, r := range page {
+			if r.ti != nil && r.commit != nil {
+				r.commit(r.ti.Value())
+			}
 		}
 	}
 	if *s.alignIdx == 1 {
@@ -186,14 +214,17 @@ func (s *settingsState) save(a *App) {
 	}
 }
 
-// refocus points the text cursor at the selected row's field, if it has one.
+// refocus points the text cursor at the selected row's field on the current
+// page, blurring every other field.
 func (s *settingsState) refocus() {
-	for _, r := range s.rows {
-		if r.ti != nil {
-			r.ti.Blur()
+	for _, page := range s.rows {
+		for _, r := range page {
+			if r.ti != nil {
+				r.ti.Blur()
+			}
 		}
 	}
-	if cur := s.rows[s.sel]; cur.ti != nil {
+	if cur := s.rows[s.page][s.sel[s.page]]; cur.ti != nil {
 		cur.ti.Focus()
 	}
 }
@@ -203,7 +234,11 @@ func (a *App) settingsView() string {
 	st := &a.settings
 	var b strings.Builder
 
-	b.WriteString(s.splashTitle.Render("Settings") + "\n\n")
+	title := "Settings"
+	if st.page == pageOverlay {
+		title = "Overlay"
+	}
+	b.WriteString(s.splashTitle.Render(title) + "\n\n")
 
 	onOff := func(v bool) string {
 		if v {
@@ -212,28 +247,31 @@ func (a *App) settingsView() string {
 		return s.dim.Render("off")
 	}
 
-	for i, r := range st.rows {
+	rows := st.rows[st.page]
+	for i, r := range rows {
 		marker := "  "
 		lbl := s.cardLabel.Render(r.label)
-		if st.sel == i {
+		if st.sel[st.page] == i {
 			marker = s.key.Render("› ")
 			lbl = s.cardTitle.Render(r.label)
 		}
 
 		var val string
 		switch {
+		case r.open != pageMain:
+			val = s.dim.Render("›")
 		case r.ti != nil:
 			val = r.ti.View()
 		case r.boolp != nil:
 			val = onOff(*r.boolp)
 		case r.enump != nil:
-			val = s.cardTitle.Render("‹ "+r.enumOpts[*r.enump]+" ›")
+			val = s.cardTitle.Render("‹ " + r.enumOpts[*r.enump] + " ›")
 		case r.display != nil:
 			val = s.name(chat.Message{Author: "url"}).Render(r.display())
 		case r.label == "log out":
 			who := s.name(chat.Message{Author: st.login}).Render(st.login)
 			lbl = s.cardLabel.Render("logged in as " + who)
-			if st.sel == i {
+			if st.sel[st.page] == i {
 				lbl = s.cardTitle.Render("logged in as " + who)
 			}
 			val = s.dim.Render("enter to log out")
@@ -242,11 +280,18 @@ func (a *App) settingsView() string {
 		b.WriteString(marker + lbl + "  " + val + "\n")
 	}
 
-	b.WriteString("\n" + s.dim.Render("config: "+config.Path()) + "\n")
-	b.WriteString(s.dim.Render("overlay changes apply on restart") + "\n")
-	b.WriteString("\n" + s.key.Render("↑/↓") + s.dim.Render(" move · ") +
-		s.key.Render("←/→/enter") + s.dim.Render(" change · ") +
-		s.key.Render("esc") + s.dim.Render(" save & close"))
+	b.WriteString("\n")
+	if st.page == pageOverlay {
+		b.WriteString(s.dim.Render("changes apply on restart") + "\n")
+		b.WriteString("\n" + s.key.Render("↑/↓") + s.dim.Render(" move · ") +
+			s.key.Render("←/→/enter") + s.dim.Render(" change · ") +
+			s.key.Render("esc") + s.dim.Render(" back"))
+	} else {
+		b.WriteString(s.dim.Render("config: "+config.Path()) + "\n")
+		b.WriteString("\n" + s.key.Render("↑/↓") + s.dim.Render(" move · ") +
+			s.key.Render("enter") + s.dim.Render(" open · ") +
+			s.key.Render("esc") + s.dim.Render(" save & close"))
+	}
 
 	box := s.cardBorder.Render(b.String())
 	return lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, box)

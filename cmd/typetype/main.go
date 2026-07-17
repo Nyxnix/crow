@@ -129,6 +129,9 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 	if len(initial) == 0 {
 		initial = cfg.Channels // reopen last session's channels
 	}
+	if len(initial) == 0 && login != "" {
+		initial = []string{login} // logged in with nothing else: open your own chat
+	}
 
 	app = tui.NewApp(tui.AppOptions{
 		Factory:     factory,
