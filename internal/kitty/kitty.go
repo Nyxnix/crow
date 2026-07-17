@@ -138,9 +138,23 @@ func (c *Cache) FlushUploads() string {
 	return b.String()
 }
 
-// load fetches and decodes one image off the render path.
+// load fetches and decodes one image off the render path, retrying a few times
+// so a transient failure (a CDN rate-limit when several badges load at once, a
+// blip) doesn't drop the image for the whole session.
 func (c *Cache) load(url string, e *entry) {
-	png, cols, err := c.fetch(url)
+	var (
+		png  []byte
+		cols int
+		err  error
+	)
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+		}
+		if png, cols, err = c.fetch(url); err == nil {
+			break
+		}
+	}
 
 	c.mu.Lock()
 	if err != nil {

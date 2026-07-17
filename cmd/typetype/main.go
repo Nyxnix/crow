@@ -102,15 +102,17 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 	}
 	badges := badge.New(clientID(), badgeToken)
 
-	// Messages are fanned out here: the overlay needs every message, and so does
-	// the TUI, but they consume at different rates.
 	fromIRC := make(chan chat.Message, 256)
-	echoCh := make(chan chat.Message, 32) // the user's own sent messages
 	toTUI := make(chan chat.Message, 256)
 
-	// ROOMSTATE arrives after JOIN and again on every reconnect; load once.
+	// The reader is anonymous even when logged in. An authenticated connection
+	// never receives its own PRIVMSGs, so it would never see the user's own
+	// messages; an anonymous reader sees the whole channel, including the user's
+	// own messages with their real message id and badges — which is what makes
+	// the user's own messages deletable. ROOMSTATE arrives after JOIN and again
+	// on reconnect; load emotes and badges once.
 	var loadOnce sync.Once
-	tw := &twitch.Client{
+	reader := &twitch.Client{
 		Channel: channel,
 		Out:     fromIRC,
 		OnRoomID: func(id string) {
@@ -128,30 +130,30 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 			})
 		},
 	}
-	// Connect authenticated when logged in, so the user can send and their own
-	// badges resolve; otherwise the client falls back to an anonymous read.
-	if session != nil {
-		tw.Nick = session.Login
-		tw.Token = session.AccessToken
-	}
-	go tw.Run(ctx)
+	go reader.Run(ctx)
 
-	// Merge live chat and the user's own echoes into one stream, apply emotes,
-	// and fan out. Twitch does not echo a client's own PRIVMSGs back, so a sent
-	// message only appears here because we inject it.
+	// The sender is a separate authenticated connection used only to send; its
+	// own reads are ignored, since the reader above is the single source of
+	// truth for what appears in chat.
+	var sender *twitch.Client
+	if session != nil {
+		sender = &twitch.Client{
+			Channel: channel,
+			Nick:    session.Login,
+			Token:   session.AccessToken,
+			Out:     make(chan chat.Message, 16),
+		}
+		go sender.Run(ctx)
+		go func() {
+			for range sender.Out { // drain and discard
+			}
+		}()
+	}
+
+	// Apply emotes and badges, then fan out to the overlay and the TUI.
 	go func() {
 		defer close(toTUI)
-		for fromIRC != nil {
-			var m chat.Message
-			select {
-			case msg, ok := <-fromIRC:
-				if !ok {
-					fromIRC = nil // IRC stopped; drain no more from it
-					continue
-				}
-				m = msg
-			case m = <-echoCh:
-			}
+		for m := range fromIRC {
 			emotes.Apply(&m)
 			badges.Resolve(&m)
 			ov.Publish(m)
@@ -170,19 +172,12 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 	}
 
 	// The send path is present only when logged in, which is also what makes the
-	// TUI show its input line.
+	// TUI show its input line. A sent message appears in chat when the anonymous
+	// reader receives it back from Twitch, the same as any other message, so
+	// there is no local echo to reconcile.
 	var sendFn func(string)
-	if session != nil {
-		sendFn = func(text string) {
-			tw.Send(text)
-			// Echo carries the user's real badges/color/display name from
-			// USERSTATE, so a sent message looks the same locally as it does to
-			// everyone else. Badges get their image URLs in the fan-out below.
-			select {
-			case echoCh <- tw.Echo(text, session.UserID, session.Login):
-			default:
-			}
-		}
+	if sender != nil {
+		sendFn = sender.Send
 	}
 
 	model := tui.NewModel(tui.Options{
