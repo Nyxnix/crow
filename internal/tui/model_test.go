@@ -35,7 +35,7 @@ func TestClickOnNameOpensCard(t *testing.T) {
 	)
 
 	// The buffer is short, so it renders at the top of the viewport.
-	click(m, 1, 0)
+	click(m, 7, 0)
 	if m.card == nil {
 		t.Fatal("clicking a name did not open the card")
 	}
@@ -49,7 +49,7 @@ func TestClickPicksTheClickedUser(t *testing.T) {
 		chat.Message{AuthorID: "1", Author: "alice", Text: "hi"},
 		chat.Message{AuthorID: "2", Author: "bob", Text: "yo"},
 	)
-	click(m, 1, 1) // second row
+	click(m, 7, 1) // second row
 	if m.card == nil {
 		t.Fatal("no card")
 	}
@@ -64,7 +64,7 @@ func TestClickOnTextDoesNotOpenCard(t *testing.T) {
 	m := newTestModel(t, 80, 10,
 		chat.Message{AuthorID: "1", Author: "alice", Text: "hello there"},
 	)
-	click(m, 30, 0)
+	click(m, 20, 0)
 	if m.card != nil {
 		t.Errorf("clicking message text opened a card for %q", m.card.userID)
 	}
@@ -75,13 +75,13 @@ func TestClickBoundaries(t *testing.T) {
 	m := newTestModel(t, 80, 10,
 		chat.Message{AuthorID: "1", Author: "alice", Text: "hi"},
 	)
-	click(m, 4, 0) // last column of "alice"
+	click(m, 10, 0) // last column of "alice" (name starts at col 6, after timestamp)
 	if m.card == nil {
 		t.Error("click on the last column of the name missed")
 	}
 	m.card = nil
 
-	click(m, 5, 0) // the ":"
+	click(m, 11, 0) // the ":"
 	if m.card != nil {
 		t.Error("click past the name opened a card")
 	}
@@ -89,7 +89,7 @@ func TestClickBoundaries(t *testing.T) {
 
 func TestClickWhileCardOpenDismissesIt(t *testing.T) {
 	m := newTestModel(t, 80, 10, chat.Message{AuthorID: "1", Author: "alice", Text: "hi"})
-	click(m, 1, 0)
+	click(m, 7, 0)
 	if m.card == nil {
 		t.Fatal("no card to dismiss")
 	}
@@ -113,7 +113,7 @@ func TestHitsFollowScroll(t *testing.T) {
 	m := newTestModel(t, 80, 10, msgs...)
 
 	// At the bottom, row 0 is not the first message.
-	click(m, 1, 0)
+	click(m, 7, 0)
 	if m.card == nil {
 		t.Fatal("no card at the bottom of a full buffer")
 	}
@@ -122,7 +122,7 @@ func TestHitsFollowScroll(t *testing.T) {
 
 	m.scrollBy(5)
 	m.View()
-	click(m, 1, 0)
+	click(m, 7, 0)
 	if m.card == nil {
 		t.Fatal("no card after scrolling")
 	}
@@ -163,7 +163,7 @@ func TestCardHistoryIsCapped(t *testing.T) {
 func TestCardLayoutFitsAndIsStable(t *testing.T) {
 	measure := func(msgs ...chat.Message) (width int, cardCol int) {
 		m := newTestModel(t, 100, 18, msgs...)
-		click(m, 1, 0)
+		click(m, 7, 0)
 		if m.card == nil {
 			t.Fatal("no card")
 		}
@@ -197,11 +197,110 @@ func TestCardLayoutFitsAndIsStable(t *testing.T) {
 
 func TestEscClosesCard(t *testing.T) {
 	m := newTestModel(t, 80, 10, chat.Message{AuthorID: "1", Author: "alice", Text: "hi"})
-	click(m, 1, 0)
+	click(m, 7, 0)
 	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.card != nil {
 		t.Error("esc did not close the card")
 	}
+}
+
+// --- sending ---------------------------------------------------------------
+
+// newSendModel builds a logged-in model whose Send records what it was given.
+func newSendModel(t *testing.T, w, h int) (*Model, *[]string) {
+	t.Helper()
+	var sent []string
+	m := NewModel(Options{
+		Channel:  "buh",
+		Incoming: make(chan chat.Message),
+		Send:     func(s string) { sent = append(sent, s) },
+	})
+	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	m.View()
+	return m, &sent
+}
+
+func typeRunes(m *Model, s string) {
+	for _, r := range s {
+		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+}
+
+func TestTypingAndEnterSends(t *testing.T) {
+	m, sent := newSendModel(t, 80, 12)
+	typeRunes(m, "hello chat")
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(*sent) != 1 || (*sent)[0] != "hello chat" {
+		t.Fatalf("sent = %v, want [hello chat]", *sent)
+	}
+	// The input clears after sending so the next message starts fresh.
+	if m.input.Value() != "" {
+		t.Errorf("input still holds %q after send", m.input.Value())
+	}
+}
+
+// An empty or whitespace-only line must not be sent: Twitch rejects it and it
+// is almost always an accidental Enter.
+func TestEnterOnEmptyDoesNotSend(t *testing.T) {
+	m, sent := newSendModel(t, 80, 12)
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	typeRunes(m, "   ")
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(*sent) != 0 {
+		t.Errorf("sent %v, want nothing", *sent)
+	}
+}
+
+// Sending snaps the view back to live so the user sees their own message.
+func TestSendSnapsToLive(t *testing.T) {
+	var msgs []chat.Message
+	for i := 0; i < 40; i++ {
+		msgs = append(msgs, chat.Message{AuthorID: "1", Author: "a", Text: "line"})
+	}
+	m, _ := newSendModel(t, 80, 12)
+	for _, msg := range msgs {
+		m.append(msg)
+	}
+	m.scrollBy(5)
+	if m.scroll == 0 {
+		t.Fatal("precondition: expected to be scrolled back")
+	}
+	typeRunes(m, "hi")
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.scroll != 0 {
+		t.Errorf("scroll = %d after send, want snapped to 0", m.scroll)
+	}
+}
+
+// A logged-in session shows the input line, which costs one row of chat.
+func TestInputLineConsumesARow(t *testing.T) {
+	withSend, _ := newSendModel(t, 80, 12)
+	readonly := newTestModel(t, 80, 12)
+	if withSend.viewportHeight() != readonly.viewportHeight()-1 {
+		t.Errorf("logged-in viewport %d, read-only %d; want one row less for the input",
+			withSend.viewportHeight(), readonly.viewportHeight())
+	}
+}
+
+// 'q' is a character to type when logged in, not a quit key.
+func TestQTypesWhenLoggedIn(t *testing.T) {
+	m, _ := newSendModel(t, 80, 12)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd != nil {
+		// tea.Quit is a command; a nil command means we did not quit.
+		if msg := cmd(); isQuit(msg) {
+			t.Fatal("'q' quit the program while logged in; it should type")
+		}
+	}
+	if m.input.Value() != "q" {
+		t.Errorf("input = %q, want the typed 'q'", m.input.Value())
+	}
+}
+
+func isQuit(msg tea.Msg) bool {
+	_, ok := msg.(tea.QuitMsg)
+	return ok
 }
 
 // --- moderation ------------------------------------------------------------
@@ -232,7 +331,7 @@ func openCardWithMod(t *testing.T, mod Moderator) (*Model, *card) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
 	m.append(chat.Message{ID: "msg-1", AuthorID: "42", Author: "alice", AuthorLogin: "alice", Text: "hi"})
 	m.View()
-	click(m, 1, 0)
+	click(m, 7, 0)
 	if m.card == nil {
 		t.Fatal("no card")
 	}
@@ -309,7 +408,7 @@ func TestActionsWithoutLoginExplain(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
 	m.append(chat.Message{ID: "m", AuthorID: "42", Author: "alice", Text: "hi"})
 	m.View()
-	click(m, 1, 0)
+	click(m, 7, 0)
 
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
 	if m.card.confirm != "" {

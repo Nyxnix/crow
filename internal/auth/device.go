@@ -22,9 +22,9 @@ var (
 	tokenURLVar  = "https://id.twitch.tv/oauth2/token"
 )
 
-// Scopes requested at login. Fixed by what the card does: ban/timeout/unban,
-// delete, read as self.
-const Scopes = "chat:read moderator:manage:banned_users moderator:manage:chat_messages user:read:email"
+// Scopes requested at login. Fixed by what the app does: read chat (chat:read)
+// and send messages (chat:edit) over IRC, and moderate over Helix.
+const Scopes = "chat:read chat:edit moderator:manage:banned_users moderator:manage:chat_messages user:read:email"
 
 // DeviceCode is what the user acts on: they open VerificationURI and enter
 // UserCode.

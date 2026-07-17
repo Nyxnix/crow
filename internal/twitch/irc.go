@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Nyxnix/typetype/internal/chat"
@@ -38,6 +39,45 @@ type Client struct {
 	// other route needs an API call, and the emote providers are all keyed by it.
 	// It fires on every reconnect, so it must tolerate being called repeatedly.
 	OnRoomID func(id string)
+
+	// outbound carries messages queued by Send to the active session's writer.
+	// Created lazily via sendChan so a caller that never sends pays nothing.
+	outbound chan string
+	sendOnce sync.Once
+
+	// addr overrides the Twitch IRC endpoint. Empty means the real one; tests
+	// point it at a local stand-in server.
+	addr string
+}
+
+// serverAddr returns the endpoint to dial.
+func (c *Client) serverAddr() string {
+	if c.addr != "" {
+		return c.addr
+	}
+	return ircAddr
+}
+
+// sendChan returns the outbound queue, creating it once. Both Send and the
+// session writer go through here so the channel exists no matter which runs
+// first.
+func (c *Client) sendChan() chan string {
+	c.sendOnce.Do(func() { c.outbound = make(chan string, 32) })
+	return c.outbound
+}
+
+// Send queues a chat message for the current connection. It never blocks: if
+// the queue is full or there is no live connection, the message is dropped
+// rather than stalling the caller (the TUI). Sending requires the client to
+// have been created with a Nick and Token; an anonymous client silently drops.
+func (c *Client) Send(text string) {
+	if c.Token == "" || strings.TrimSpace(text) == "" {
+		return
+	}
+	select {
+	case c.sendChan() <- text:
+	default: // ponytail: drop when backed up; a human types slower than Twitch's limit
+	}
 }
 
 // Run connects and pumps messages into Out until ctx is cancelled, reconnecting
@@ -67,19 +107,37 @@ func (c *Client) Run(ctx context.Context) error {
 
 // session holds one connection open until it fails or ctx ends.
 func (c *Client) session(ctx context.Context) error {
-	d := &tls.Dialer{}
-	conn, err := d.DialContext(ctx, "tcp", ircAddr)
+	// Tests point addr at a stand-in server with a self-signed cert, so skip
+	// verification when an override is set; the real endpoint is verified.
+	d := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: c.addr != ""}}
+	conn, err := d.DialContext(ctx, "tcp", c.serverAddr())
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.Close()
 
+	// session-scoped context so the writer goroutine stops when this connection
+	// ends, not only when the whole client does.
+	sctx, scancel := context.WithCancel(ctx)
+	defer scancel()
+
 	// Cancelling ctx won't interrupt a blocked Read on its own, so close the
 	// socket out from under it, which makes the read fail and unwinds session.
 	go func() {
-		<-ctx.Done()
+		<-sctx.Done()
 		conn.Close()
 	}()
+
+	// All socket writes go through writeLine. The read loop writes PONGs and the
+	// writer goroutine writes PRIVMSGs, so without this mutex two goroutines
+	// could write the same TLS connection at once, which corrupts the stream.
+	var writeMu sync.Mutex
+	writeLine := func(s string) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_, err := conn.Write([]byte(s + "\r\n"))
+		return err
+	}
 
 	nick, pass := c.Nick, "oauth:"+c.Token
 	if c.Token == "" {
@@ -95,10 +153,29 @@ func (c *Client) session(ctx context.Context) error {
 		"NICK " + nick,
 		"JOIN #" + strings.ToLower(c.Channel),
 	} {
-		if _, err := conn.Write([]byte(line + "\r\n")); err != nil {
+		if err := writeLine(line); err != nil {
 			return fmt.Errorf("handshake: %w", err)
 		}
 		time.Sleep(writeLimit)
+	}
+
+	// Drain queued outgoing messages for as long as this connection lives. An
+	// authenticated client only; an anonymous one has nothing to send.
+	if c.Token != "" {
+		channel := strings.ToLower(c.Channel)
+		go func() {
+			for {
+				select {
+				case <-sctx.Done():
+					return
+				case text := <-c.sendChan():
+					if err := writeLine("PRIVMSG #" + channel + " :" + text); err != nil {
+						return // socket is gone; the read loop will surface it
+					}
+					time.Sleep(writeLimit)
+				}
+			}
+		}()
 	}
 
 	// Twitch lines cap at ~4KB of tags plus text; give the scanner room so a
@@ -114,7 +191,7 @@ func (c *Client) session(ctx context.Context) error {
 		switch line.cmd {
 		case "PING":
 			// Twitch pings every ~5min and disconnects if we don't echo it back.
-			if _, err := conn.Write([]byte("PONG :tmi.twitch.tv\r\n")); err != nil {
+			if err := writeLine("PONG :tmi.twitch.tv"); err != nil {
 				return err
 			}
 		case "ROOMSTATE":

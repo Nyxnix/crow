@@ -89,8 +89,9 @@ func TestLayoutRecordsNameHit(t *testing.T) {
 	if h == nil {
 		t.Fatal("no hit recorded; the name would not be clickable")
 	}
-	if h.row != 0 || h.x0 != 0 || h.x1 != 3 || h.msg != 0 {
-		t.Errorf("hit = %+v, want row 0 cols [0,3) msg 0", *h)
+	// The name sits after a 6-column "HH:MM " timestamp, so its box starts at 6.
+	if h.row != 0 || h.x0 != 6 || h.x1 != 9 || h.msg != 0 {
+		t.Errorf("hit = %+v, want row 0 cols [6,9) msg 0", *h)
 	}
 }
 
@@ -104,9 +105,9 @@ func TestLayoutHitBoxIsDisplayWidth(t *testing.T) {
 	if h == nil {
 		t.Fatal("no hit recorded")
 	}
-	// Three CJK runes occupy six columns.
-	if h.x1 != 6 {
-		t.Errorf("hit x1 = %d, want 6; rune-counting would give 3", h.x1)
+	// Three CJK runes occupy six columns, after the 6-column timestamp: [6,12).
+	if h.x0 != 6 || h.x1 != 12 {
+		t.Errorf("hit = [%d,%d), want [6,12); rune-counting would give width 3", h.x0, h.x1)
 	}
 }
 
@@ -123,9 +124,10 @@ func TestLayoutHitBoxShiftsPastRoleTag(t *testing.T) {
 	if th.x0 == ph.x0 {
 		t.Errorf("tagged hit starts at %d, same as untagged; the [B] marker was not accounted for", th.x0)
 	}
-	// "[B] " is four columns.
-	if th.x0 != 4 || th.x1 != 7 {
-		t.Errorf("tagged hit = [%d,%d), want [4,7)", th.x0, th.x1)
+	// Untagged name sits at column 6 (after the timestamp); the "[B] " marker is
+	// four more columns, so a tagged name starts at 10.
+	if th.x0 != 10 || th.x1 != 13 {
+		t.Errorf("tagged hit = [%d,%d), want [10,13)", th.x0, th.x1)
 	}
 	if width := th.x1 - th.x0; width != ph.x1-ph.x0 {
 		t.Errorf("tagged name box is %d wide, untagged %d; they are the same name", width, ph.x1-ph.x0)
@@ -159,6 +161,29 @@ func TestLayoutHitsAcrossWrappedMessages(t *testing.T) {
 	// The second message starts after the first one's wrapped lines.
 	if hits[1].row <= hits[0].row {
 		t.Errorf("second hit row %d not after first %d", hits[1].row, hits[0].row)
+	}
+}
+
+func TestTimestampFormat(t *testing.T) {
+	at := time.Date(2026, 7, 17, 9, 5, 0, 0, time.UTC)
+	if got := timestamp(chat.Message{At: at}); got != "09:05 " {
+		t.Errorf("timestamp = %q, want %q", got, "09:05 ")
+	}
+	// A zero time still takes the same width so columns line up.
+	if got := timestamp(chat.Message{}); got != "      " {
+		t.Errorf("zero-time timestamp = %q, want 6 spaces", got)
+	}
+}
+
+// The timestamp is rendered before the name, and the name stays clickable.
+func TestLayoutRendersTimestamp(t *testing.T) {
+	at := time.Date(2026, 7, 17, 14, 30, 0, 0, time.UTC)
+	lines := layout([]chat.Message{{Author: "nyx", Text: "hi", At: at}}, 40, newStyles())
+	if !strings.Contains(lines[0].text, "14:30") {
+		t.Errorf("line %q missing the timestamp", lines[0].text)
+	}
+	if lines[0].hit == nil {
+		t.Error("timestamp broke the name hit")
 	}
 }
 

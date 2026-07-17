@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Nyxnix/typetype/internal/chat"
@@ -49,6 +50,11 @@ type Model struct {
 	mod     Moderator
 	clients func() int // connected overlay browser sources
 
+	// send delivers a typed message to Twitch. Nil when not logged in, which is
+	// also what decides whether the input line is shown and focused.
+	send  func(string)
+	input textinput.Model
+
 	incoming <-chan chat.Message
 	err      error
 }
@@ -59,15 +65,31 @@ type Options struct {
 	Emotes   *emote.Registry
 	Mod      Moderator
 	Clients  func() int
+
+	// Send delivers a typed message. Leave nil for a read-only (not logged in)
+	// session; the input line then shows a hint instead of a prompt.
+	Send func(string)
 }
 
 func NewModel(o Options) *Model {
+	ti := textinput.New()
+	ti.Prompt = "› "
+	ti.Placeholder = "Send a message…"
+	// Twitch's own hard cap on a chat line; stop typing rather than have the
+	// message silently truncated on send.
+	ti.CharLimit = 500
+	if o.Send != nil {
+		ti.Focus()
+	}
+
 	return &Model{
 		channel:  o.Channel,
 		styles:   newStyles(),
 		emotes:   o.Emotes,
 		mod:      o.Mod,
 		clients:  o.Clients,
+		send:     o.Send,
+		input:    ti,
 		incoming: o.Incoming,
 	}
 }
@@ -91,7 +113,11 @@ func waitForChat(ch <-chan chat.Message) tea.Cmd {
 }
 
 func (m *Model) Init() tea.Cmd {
-	return waitForChat(m.incoming)
+	cmds := []tea.Cmd{waitForChat(m.incoming)}
+	if m.send != nil {
+		cmds = append(cmds, textinput.Blink)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -121,6 +147,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+
+	// Non-key, non-mouse messages (the cursor's blink ticks) belong to the
+	// input when it exists.
+	if m.send != nil {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
 	return m, nil
 }
 
@@ -145,8 +179,49 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.cardKey(msg)
 	}
 
+	// Keys that mean the same thing in either mode.
 	switch msg.String() {
-	case "ctrl+c", "q":
+	case "ctrl+c":
+		return m, tea.Quit
+	case "pgup":
+		m.scrollBy(m.viewportHeight() / 2)
+		return m, nil
+	case "pgdown":
+		m.scrollBy(-m.viewportHeight() / 2)
+		return m, nil
+	}
+
+	// Logged in: the input is focused, so letters type. Scrolling is by wheel,
+	// PgUp/PgDn, and the arrows (which a single-line input ignores). Quit is
+	// ctrl+c only, since 'q' is a character someone may want to type.
+	if m.send != nil {
+		switch msg.String() {
+		case "enter":
+			text := strings.TrimSpace(m.input.Value())
+			if text != "" {
+				m.send(text)
+				m.input.Reset()
+				m.scroll = 0 // snap to live so the user sees their own message land
+			}
+			return m, nil
+		case "up":
+			m.scrollBy(1)
+			return m, nil
+		case "down":
+			m.scrollBy(-1)
+			return m, nil
+		case "esc":
+			m.scroll = 0
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
+
+	// Read-only: no input to focus, so vim-style navigation and 'q' to quit.
+	switch msg.String() {
+	case "q":
 		return m, tea.Quit
 	case "g":
 		m.scroll = m.maxScroll()
@@ -156,10 +231,6 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.scrollBy(1)
 	case "down", "j":
 		m.scrollBy(-1)
-	case "pgup":
-		m.scrollBy(m.viewportHeight() / 2)
-	case "pgdown":
-		m.scrollBy(-m.viewportHeight() / 2)
 	}
 	return m, nil
 }
@@ -212,6 +283,9 @@ func (m *Model) scrollBy(n int) {
 
 func (m *Model) viewportHeight() int {
 	h := m.height - 1 // status bar
+	if m.send != nil {
+		h-- // input line
+	}
 	if h < 1 {
 		return 1
 	}
@@ -284,7 +358,19 @@ func (m *Model) View() string {
 	if m.card != nil {
 		body = m.renderCard(body)
 	}
-	return body + "\n" + m.statusBar()
+
+	out := body
+	if m.send != nil {
+		out += "\n" + m.inputLine()
+	}
+	return out + "\n" + m.statusBar()
+}
+
+// inputLine renders the message composer. It shows the text field when logged
+// in; the caller only calls this when send is set, so there is no not-logged-in
+// branch here.
+func (m *Model) inputLine() string {
+	return m.input.View()
 }
 
 func (m *Model) statusBar() string {

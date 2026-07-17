@@ -12,6 +12,16 @@ import (
 // author column readable when messages are long.
 const continuationIndent = 2
 
+// timestamp formats a message's time as the "HH:MM " prefix shown before the
+// author. A message with no time (shouldn't happen for real ones) still gets a
+// fixed-width blank so columns stay aligned.
+func timestamp(m chat.Message) string {
+	if m.At.IsZero() {
+		return "      "
+	}
+	return m.At.Format("15:04") + " "
+}
+
 // hit records where a clickable username landed on screen. The renderer is the
 // only thing that knows this, so it has to hand it back rather than have the
 // click handler guess.
@@ -39,6 +49,11 @@ func layout(msgs []chat.Message, width int, style *styles) []line {
 	for i, m := range msgs {
 		name := m.Author
 
+		// A "HH:MM " timestamp leads every message, so it shifts everything after
+		// it — including the name's hit box — right by its fixed 6 columns.
+		ts := timestamp(m)
+		tsW := runewidth.StringWidth(ts)
+
 		// The role marker stands in for the badge images the overlay shows. It
 		// sits before the name, so it shifts the name's hit box right by its
 		// width plus the space after it.
@@ -48,7 +63,8 @@ func layout(msgs []chat.Message, width int, style *styles) []line {
 			tagW = lipglossWidth(tag) + 1
 		}
 
-		prefixW := tagW + runewidth.StringWidth(name) + 2 // name + ": "
+		nameStart := tsW + tagW
+		prefixW := nameStart + runewidth.StringWidth(name) + 2 // name + ": "
 
 		// A name wider than the line has nothing sensible to wrap against; give
 		// the text its own lines instead of a negative budget.
@@ -66,12 +82,13 @@ func layout(msgs []chat.Message, width int, style *styles) []line {
 
 		h := &hit{
 			row: len(out),
-			x0:  tagW,
-			x1:  tagW + runewidth.StringWidth(name),
+			x0:  nameStart,
+			x1:  nameStart + runewidth.StringWidth(name),
 			msg: i,
 		}
 
 		var b strings.Builder
+		b.WriteString(style.dim.Render(ts))
 		if tag != "" {
 			b.WriteString(tag + " ")
 		}

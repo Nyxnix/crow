@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -73,9 +74,11 @@ func exit(err error) {
 }
 
 func run(ctx context.Context, channel, addr string, headless bool) error {
-	// Resolve the login, if any, before starting the UI. A logged-in user gets
-	// moderation; everyone else reads chat and the card explains the gap.
-	mod := setupModerator(ctx, channel)
+	// Resolve the login once, before starting the UI. A logged-in user reads as
+	// themselves, can send, and can moderate; everyone else reads anonymously and
+	// the UI explains the gaps.
+	session := loadSession(ctx)
+	mod := buildModerator(ctx, channel, session)
 
 	ov := overlay.New()
 	srv := &http.Server{Addr: addr, Handler: ov.Handler()}
@@ -93,6 +96,7 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 	// Messages are fanned out here: the overlay needs every message, and so does
 	// the TUI, but they consume at different rates.
 	fromIRC := make(chan chat.Message, 256)
+	echoCh := make(chan chat.Message, 32) // the user's own sent messages
 	toTUI := make(chan chat.Message, 256)
 
 	// ROOMSTATE arrives after JOIN and again on every reconnect; load once.
@@ -110,11 +114,30 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 			})
 		},
 	}
+	// Connect authenticated when logged in, so the user can send and their own
+	// badges resolve; otherwise the client falls back to an anonymous read.
+	if session != nil {
+		tw.Nick = session.Login
+		tw.Token = session.AccessToken
+	}
 	go tw.Run(ctx)
 
+	// Merge live chat and the user's own echoes into one stream, apply emotes,
+	// and fan out. Twitch does not echo a client's own PRIVMSGs back, so a sent
+	// message only appears here because we inject it.
 	go func() {
 		defer close(toTUI)
-		for m := range fromIRC {
+		for fromIRC != nil {
+			var m chat.Message
+			select {
+			case msg, ok := <-fromIRC:
+				if !ok {
+					fromIRC = nil // IRC stopped; drain no more from it
+					continue
+				}
+				m = msg
+			case m = <-echoCh:
+			}
 			emotes.Apply(&m)
 			ov.Publish(m)
 			select {
@@ -131,12 +154,35 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 		return nil
 	}
 
+	// The send path is present only when logged in, which is also what makes the
+	// TUI show its input line.
+	var sendFn func(string)
+	if session != nil {
+		sendFn = func(text string) {
+			tw.Send(text)
+			echo := chat.Message{
+				Platform:    chat.Twitch,
+				Channel:     channel,
+				AuthorID:    session.UserID,
+				Author:      session.Login,
+				AuthorLogin: session.Login,
+				Text:        text,
+				At:          time.Now(),
+			}
+			select {
+			case echoCh <- echo:
+			default:
+			}
+		}
+	}
+
 	model := tui.NewModel(tui.Options{
 		Channel:  channel,
 		Incoming: toTUI,
 		Emotes:   emotes,
 		Clients:  ov.Clients,
 		Mod:      mod,
+		Send:     sendFn,
 	})
 
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
@@ -144,32 +190,32 @@ func run(ctx context.Context, channel, addr string, headless bool) error {
 	return err
 }
 
-// setupModerator returns a Moderator if the user is logged in, or nil.
-//
-// A nil interface is what the TUI reads as "not logged in", which the card
-// explains. Any auth or lookup problem is logged and returns nil rather than
-// blocking chat, which needs no auth at all.
-//
-// The channel's broadcaster ID is resolved synchronously here so the returned
-// Helix is fully constructed — no field is mutated later from another
-// goroutine, which is what a ROOMSTATE-driven callback would have required.
-func setupModerator(ctx context.Context, channel string) tui.Moderator {
-	ac := &auth.Client{ClientID: clientID()}
-	st, err := ac.Ensure(ctx)
+// loadSession returns the stored login, refreshing it if needed, or nil when
+// the user is not logged in. An auth error is logged and treated as "not logged
+// in" rather than blocking chat, which needs no auth at all.
+func loadSession(ctx context.Context) *auth.StoredToken {
+	st, err := (&auth.Client{ClientID: clientID()}).Ensure(ctx)
 	if err != nil {
 		log.Printf("auth: %v", err)
 		return nil
 	}
-	if st == nil {
-		return nil // not logged in
-	}
+	return st
+}
 
+// buildModerator returns a Moderator for the session, or nil.
+//
+// The channel's broadcaster ID is resolved synchronously here so the returned
+// Helix is fully constructed — no field is mutated later from another
+// goroutine, which is what a ROOMSTATE-driven callback would have required.
+func buildModerator(ctx context.Context, channel string, st *auth.StoredToken) tui.Moderator {
+	if st == nil {
+		return nil
+	}
 	broadcasterID, err := twitch.UserID(ctx, clientID(), st.AccessToken, channel, nil)
 	if err != nil {
 		log.Printf("auth: resolving channel %q: %v", channel, err)
 		return nil
 	}
-
 	return &twitch.Helix{
 		ClientID:      clientID(),
 		Token:         st.AccessToken,
