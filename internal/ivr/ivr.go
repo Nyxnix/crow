@@ -26,6 +26,7 @@ var baseURL = "https://api.ivr.fi/v2"
 // the local message buffer provides.
 type CardInfo struct {
 	CreatedAt  time.Time  // account creation
+	AvatarURL  string     // profile picture
 	FollowedAt *time.Time // nil if not following, or the channel hides it
 	SubTier    string     // "1", "2", "3", or "" if not subscribed
 	SubMonths  int        // cumulative months, 0 if not subscribed
@@ -49,7 +50,7 @@ func (c *Client) client() *http.Client {
 func (c *Client) CardInfo(ctx context.Context, userLogin, channelLogin string) (CardInfo, error) {
 	var (
 		info    CardInfo
-		created time.Time
+		user    userResp
 		sub     subage
 		errUser error
 		errSub  error
@@ -59,7 +60,7 @@ func (c *Client) CardInfo(ctx context.Context, userLogin, channelLogin string) (
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		created, errUser = c.createdAt(ctx, userLogin)
+		user, errUser = c.user(ctx, userLogin)
 	}()
 	go func() {
 		defer wg.Done()
@@ -68,7 +69,10 @@ func (c *Client) CardInfo(ctx context.Context, userLogin, channelLogin string) (
 	wg.Wait()
 
 	if errUser == nil {
-		info.CreatedAt = created
+		if t, err := time.Parse(time.RFC3339, user.CreatedAt); err == nil {
+			info.CreatedAt = t
+		}
+		info.AvatarURL = user.Logo
 	}
 	if errSub == nil {
 		info.SubHidden = sub.StatusHidden
@@ -96,18 +100,19 @@ func (c *Client) CardInfo(ctx context.Context, userLogin, channelLogin string) (
 
 type userResp struct {
 	CreatedAt string `json:"createdAt"`
+	Logo      string `json:"logo"`
 }
 
-func (c *Client) createdAt(ctx context.Context, login string) (time.Time, error) {
+func (c *Client) user(ctx context.Context, login string) (userResp, error) {
 	// The user endpoint returns an array of matches.
 	var out []userResp
 	if err := c.getJSON(ctx, baseURL+"/twitch/user?login="+url.QueryEscape(login), &out); err != nil {
-		return time.Time{}, err
+		return userResp{}, err
 	}
-	if len(out) == 0 || out[0].CreatedAt == "" {
-		return time.Time{}, fmt.Errorf("no user")
+	if len(out) == 0 {
+		return userResp{}, fmt.Errorf("no user")
 	}
-	return time.Parse(time.RFC3339, out[0].CreatedAt)
+	return out[0], nil
 }
 
 type subage struct {

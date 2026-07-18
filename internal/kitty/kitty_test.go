@@ -234,3 +234,28 @@ func TestFailedFetchStaysNotReady(t *testing.T) {
 		t.Error("a failed fetch reported ready")
 	}
 }
+
+func TestScaleText(t *testing.T) {
+	// Plain text is wrapped in OSC 66 at the given scale.
+	if got := ScaleText("hi", 2); got != "\x1b]66;s=2;hi\x1b\\" {
+		t.Errorf("plain text: %q", got)
+	}
+	// Scale 1 is a no-op.
+	if got := ScaleText("hi", 1); got != "hi" {
+		t.Errorf("scale 1 changed the string: %q", got)
+	}
+	// SGR sequences pass through unwrapped, splitting the text runs around them.
+	got := ScaleText("\x1b[31mred\x1b[39m plain", 2)
+	want := "\x1b[31m\x1b]66;s=2;red\x1b\\\x1b[39m\x1b]66;s=2; plain\x1b\\"
+	if got != want {
+		t.Errorf("styled: got %q want %q", got, want)
+	}
+	// Placeholder cells (and their diacritics) must never be wrapped: kitty
+	// renders them blank inside a scaled run.
+	ph := placeholder + diacritic(0) + diacritic(1)
+	got = ScaleText("a"+ph+"b", 2)
+	want = "\x1b]66;s=2;a\x1b\\" + ph + "\x1b]66;s=2;b\x1b\\"
+	if got != want {
+		t.Errorf("placeholders: got %q want %q", got, want)
+	}
+}

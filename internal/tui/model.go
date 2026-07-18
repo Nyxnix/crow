@@ -70,6 +70,10 @@ type Model struct {
 	// graphics protocol; nil elsewhere, where badges fall back to text.
 	gfx *kitty.Cache
 
+	// scale draws chat lines at this multiple via kitty's text sizing protocol
+	// (1 = normal). Set by the App from config, only on terminals that speak it.
+	scale int
+
 	// onRedraw asks the host (the App) to re-render, so state changed off the UI
 	// goroutine — a new message, a loaded image, fresh stats — becomes visible.
 	onRedraw func()
@@ -95,6 +99,10 @@ type Options struct {
 	// session; the input line then shows a hint instead of a prompt.
 	Send func(string)
 
+	// SendLimit caps typed message length; 0 means Twitch's 500. YouTube caps
+	// at 200, and stopping typing beats a send the platform silently rejects.
+	SendLimit int
+
 	// OnRedraw asks the host to re-render after Append/ApplyModEvent or an image
 	// load. Required for a hosted model; defaults to a no-op.
 	OnRedraw func()
@@ -104,9 +112,12 @@ func NewModel(o Options) *Model {
 	ti := textinput.New()
 	ti.Prompt = "› "
 	ti.Placeholder = "Send a message…"
-	// Twitch's own hard cap on a chat line; stop typing rather than have the
+	// The platform's hard cap on a chat line; stop typing rather than have the
 	// message silently truncated on send.
 	ti.CharLimit = 500
+	if o.SendLimit > 0 {
+		ti.CharLimit = o.SendLimit
+	}
 	if o.Send != nil {
 		ti.Focus()
 	}
@@ -259,10 +270,10 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "pgup":
-		m.scrollBy(m.viewportHeight() / 2)
+		m.scrollBy(m.viewportHeight() / 2 / m.effScale())
 		return m, nil
 	case "pgdown":
-		m.scrollBy(-m.viewportHeight() / 2)
+		m.scrollBy(-m.viewportHeight() / 2 / m.effScale())
 		return m, nil
 	}
 
@@ -401,12 +412,23 @@ func (m *Model) chatWidth() int {
 	return w
 }
 
+// effScale is the scale chat actually renders at right now. The cards overlay
+// chat by column-composited strings whose width measurement can't see through
+// OSC 66 wrapping, so an open card drops chat to 1x until it closes.
+func (m *Model) effScale() int {
+	if m.scale > 1 && m.card == nil && m.emoteCard == nil {
+		return m.scale
+	}
+	return 1
+}
+
 // maxScroll is how far back the current layout allows. It re-lays out to find
 // out, which is cheap at this history size and avoids caching a number that
 // goes stale on every resize or card toggle.
 func (m *Model) maxScroll() int {
-	lines := layout(m.snapshot(), m.chatWidth(), m.styles, m.gfx)
-	if n := len(lines) - m.viewportHeight(); n > 0 {
+	scale := m.effScale()
+	lines := layout(m.snapshot(), m.chatWidth(), m.styles, m.gfx, scale)
+	if n := len(lines) - m.viewportHeight()/scale; n > 0 {
 		return n
 	}
 	return 0
@@ -422,36 +444,62 @@ func (m *Model) View() string {
 	// grown or been trimmed. Both View and the click handler run on the UI
 	// goroutine, so lastRender needs no lock.
 	m.lastRender = m.snapshot()
-	lines := layout(m.lastRender, m.chatWidth(), m.styles, m.gfx)
+	scale := m.effScale()
+	lines := layout(m.lastRender, m.chatWidth(), m.styles, m.gfx, scale)
 	vh := m.viewportHeight()
+	vhl := vh / scale // logical lines that fit; each occupies scale rows
+	if vhl < 1 {
+		vhl = 1
+	}
 
 	// Take the window ending `scroll` lines from the bottom.
 	end := len(lines) - m.scroll
 	if end < 0 {
 		end = 0
 	}
-	start := end - vh
+	start := end - vhl
 	if start < 0 {
 		start = 0
 	}
 	window := lines[start:end]
 
 	// Hits are recorded against absolute line numbers; the click handler works
-	// in screen rows, so rebase them and drop those scrolled out of view.
+	// in screen rows, so rebase them (a scaled line spans scale rows, all
+	// clickable) and drop those scrolled out of view.
 	m.hits = m.hits[:0]
 	m.emoteHits = m.emoteHits[:0]
 	rows := make([]string, 0, vh)
 	for i, l := range window {
-		if l.hit != nil {
-			h := *l.hit
-			h.row = i
-			m.hits = append(m.hits, h)
+		for dy := 0; dy < scale; dy++ {
+			if l.hit != nil {
+				h := *l.hit
+				h.row = i*scale + dy
+				m.hits = append(m.hits, h)
+			}
+			for _, e := range l.emotes {
+				e.row = i*scale + dy
+				m.emoteHits = append(m.emoteHits, e)
+			}
 		}
-		for _, e := range l.emotes {
-			e.row = i
-			m.emoteHits = append(m.emoteHits, e)
+		// At scale, every row clears itself first: bubbletea rewrites changed
+		// lines in place, and writing scaled glyphs over stale multicell cells
+		// makes kitty skip or space-fill unpredictably. An explicit erase gives
+		// each rewrite a clean band.
+		if scale > 1 {
+			rows = append(rows, "\x1b[2K"+l.text)
+		} else {
+			rows = append(rows, l.text)
 		}
-		rows = append(rows, l.text)
+		// Filler rows are never erased — they hold the bottom cells of the
+		// scaled glyphs above, and kitty deletes a glyph whose cells an erase
+		// touches. The rows sweep themselves clean with spaces instead.
+		for dy := 1; dy < scale; dy++ {
+			f := ""
+			if dy-1 < len(l.fillers) {
+				f = l.fillers[dy-1]
+			}
+			rows = append(rows, f)
+		}
 	}
 	// Pad so the status bar stays pinned to the bottom on a short backlog.
 	for len(rows) < vh {
@@ -496,9 +544,18 @@ type StreamStats struct {
 	Uptime     time.Duration
 }
 
+// specLabel shows a tab spec: a plain Twitch channel gets the familiar "#",
+// combined and YouTube specs are shown as typed.
+func specLabel(spec string) string {
+	if strings.ContainsAny(spec, "+:") {
+		return spec
+	}
+	return "#" + spec
+}
+
 func (m *Model) statusBar() string {
 	// Left: channel and, when live, the stream stats.
-	left := fmt.Sprintf(" #%s ", m.channel)
+	left := fmt.Sprintf(" %s ", specLabel(m.channel))
 	if m.stats != nil {
 		if s := m.stats(); s.Live {
 			left += fmt.Sprintf("· %s viewers (avg %s) · up %s ",
@@ -515,7 +572,7 @@ func (m *Model) statusBar() string {
 	if m.clients != nil {
 		parts = append(parts, fmt.Sprintf("%d overlay", m.clients()))
 	}
-	if m.mod == nil {
+	if m.mod == nil && m.send == nil {
 		parts = append(parts, "not logged in")
 	}
 	if m.scroll > 0 {

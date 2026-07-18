@@ -4,10 +4,8 @@ package config
 
 import (
 	"encoding/json"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 )
 
 // Config is the persisted app configuration.
@@ -24,9 +22,26 @@ type Config struct {
 	Overlay OverlayOptions `json:"overlay"`
 	// Channels are the channels to reopen on the next launch.
 	Channels []string `json:"channels"`
+	// ChatScale draws TUI chat lines at this multiple (1 = normal, 2 = double)
+	// on terminals that support kitty's text sizing protocol.
+	ChatScale int `json:"chat_scale"`
 	// Anonymous records that the user chose to browse without logging in, so the
 	// splash does not nag them every launch.
 	Anonymous bool `json:"anonymous"`
+
+	// YouTubeCookies is the user's youtube.com Cookie header, the primary way
+	// crow acts as their account on YouTube (send, moderate, card info) via the
+	// same innertube endpoints the web player uses — no Google Cloud client or
+	// API quota. Pasted once on the settings YouTube page. A credential; the
+	// config file is written 0600.
+	YouTubeCookies string `json:"youtube_cookies,omitempty"`
+
+	// YouTubeClientID/Secret are the user's own Google OAuth client ("TVs and
+	// Limited Input devices" type), the Data-API fallback used by `crow login
+	// youtube` when no cookies are set. For this client type the secret is not
+	// confidential, but the config file is 0600 anyway.
+	YouTubeClientID     string `json:"youtube_client_id,omitempty"`
+	YouTubeClientSecret string `json:"youtube_client_secret,omitempty"`
 }
 
 // OverlayOptions are the jChat-style overlay parameters. They map one-to-one to
@@ -49,6 +64,7 @@ func Default() Config {
 	return Config{
 		OverlayEnabled: true,
 		OverlayAddr:    "127.0.0.1:7788",
+		ChatScale:      1,
 		Overlay: OverlayOptions{
 			Align:   "bottom",
 			Size:    20,
@@ -60,46 +76,10 @@ func Default() Config {
 	}
 }
 
-// OverlayURL is the browser-source URL for OBS, encoding only the options that
-// differ from the overlay's own defaults so a stock setup stays a clean "/".
+// OverlayURL is the browser-source URL for OBS. Always a bare "/" — the server
+// pushes the display options to the page over SSE, so nothing rides the URL.
 func (c Config) OverlayURL() string {
-	o := c.Overlay
-	q := url.Values{}
-	if !o.Animate {
-		q.Set("animate", "0")
-	}
-	if !o.Badges {
-		q.Set("badges", "0")
-	}
-	if o.HideCommands {
-		q.Set("hide_commands", "1")
-	}
-	if o.Align == "top" {
-		q.Set("align", "top")
-	}
-	if o.Font != 0 {
-		q.Set("font", strconv.Itoa(o.Font))
-	}
-	if o.Size != 20 {
-		q.Set("size", strconv.Itoa(o.Size))
-	}
-	if o.Stroke != 2 {
-		q.Set("stroke", strconv.Itoa(o.Stroke))
-	}
-	if o.Fade != 0 {
-		q.Set("fade", strconv.Itoa(o.Fade))
-	}
-	if o.Max != 50 {
-		q.Set("max", strconv.Itoa(o.Max))
-	}
-	if o.Bots != "" {
-		q.Set("bots", o.Bots)
-	}
-	u := "http://" + c.OverlayAddr + "/"
-	if len(q) > 0 {
-		u += "?" + q.Encode()
-	}
-	return u
+	return "http://" + c.OverlayAddr + "/"
 }
 
 func path() (string, error) {
@@ -126,6 +106,9 @@ func Load() Config {
 	json.Unmarshal(data, &c)
 	if c.OverlayAddr == "" {
 		c.OverlayAddr = Default().OverlayAddr
+	}
+	if c.ChatScale < 1 {
+		c.ChatScale = 1 // configs saved before this field existed decode as 0
 	}
 	return c
 }

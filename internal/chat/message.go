@@ -73,6 +73,10 @@ type Message struct {
 	// struck through so moderators can see what happened.
 	Deleted bool
 
+	// ModParams is YouTube's opaque context-menu token for this message, the
+	// key to cookie-based moderation (remove/timeout/hide). Empty on Twitch.
+	ModParams string
+
 	At time.Time
 }
 

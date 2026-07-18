@@ -6,6 +6,7 @@
 package overlay
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -32,6 +33,10 @@ const clientBuffer = 64
 type Server struct {
 	mu      sync.Mutex
 	clients map[chan []byte]struct{}
+	// settings is the current display options as JSON, sent to each browser
+	// source on connect and re-broadcast when they change, so the page needs
+	// nothing in its URL and picks up edits live.
+	settings []byte
 }
 
 func New() *Server {
@@ -62,6 +67,24 @@ type wireEmote struct {
 type wireBadge struct {
 	URL  string `json:"url"`
 	Name string `json:"name"`
+}
+
+// SetOptions publishes the overlay's display options (any JSON-marshalable
+// value; in practice config.OverlayOptions, kept as `any` so this package
+// doesn't depend on config's shape). Unchanged options are not re-broadcast,
+// so callers can push on every save and file-watch tick without spamming.
+func (s *Server) SetOptions(v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	changed := !bytes.Equal(s.settings, b)
+	s.settings = b
+	s.mu.Unlock()
+	if changed {
+		s.broadcast(frame("settings", b))
+	}
 }
 
 // Publish sends a message to every connected browser source. It never blocks:
@@ -185,6 +208,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// Flush headers immediately so EventSource fires onopen rather than waiting
 	// for the first message, which may be minutes away in a quiet chat.
 	fmt.Fprint(w, ": connected\n\n")
+	// Current settings first, so the page styles itself before any message.
+	s.mu.Lock()
+	settings := s.settings
+	s.mu.Unlock()
+	if settings != nil {
+		w.Write(frame("settings", settings))
+	}
 	rc.Flush()
 
 	for {

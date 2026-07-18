@@ -15,6 +15,7 @@ import (
 	"image"
 	"image/draw"
 	"image/gif"
+	_ "image/jpeg" // decode Twitch/YouTube profile pictures
 	"image/png"
 	"io"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	_ "golang.org/x/image/webp" // decode static 7TV/BTTV webp emotes
 )
@@ -52,6 +54,106 @@ func Supported() bool {
 	}
 	return false
 }
+
+// TextSizing reports whether the terminal supports the OSC 66 text sizing
+// protocol (kitty ≥ 0.40). Other graphics-capable terminals (ghostty, WezTerm)
+// do not speak it, and an unsupported terminal swallows the wrapped text
+// entirely, so this must be a strict kitty check.
+func TextSizing() bool {
+	return os.Getenv("KITTY_WINDOW_ID") != "" || strings.Contains(os.Getenv("TERM"), "kitty")
+}
+
+// ScaleText wraps the plain-text runs of an already-styled line in OSC 66 so
+// kitty draws them at scale (each glyph scale× wide, scale rows tall, anchored
+// at the emitted row). Escape sequences pass through untouched — SGR state
+// still applies to the scaled text — and image placeholder runs (U+10EEEE plus
+// its combining diacritics) also pass through, because kitty does not render
+// placeholders inside a scaled run; callers draw those as multi-row placements
+// instead.
+func ScaleText(s string, scale int) string {
+	if scale <= 1 || s == "" {
+		return s
+	}
+	var b strings.Builder
+	var run []byte
+	flush := func() {
+		// The protocol caps one sequence's text at 4096 bytes; chat lines are far
+		// shorter, but split defensively rather than corrupt.
+		for len(run) > 0 {
+			n := len(run)
+			if n > 4000 {
+				n = 4000
+				for n > 0 && run[n]&0xC0 == 0x80 { // don't split mid-rune
+					n--
+				}
+			}
+			fmt.Fprintf(&b, "\x1b]66;s=%d;%s\x1b\\", scale, run[:n])
+			run = run[n:]
+		}
+	}
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b {
+			flush()
+			j := escapeEnd(s, i)
+			b.WriteString(s[i:j])
+			i = j
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == placeholderRune || isDiacritic(r) {
+			flush()
+			b.WriteString(s[i : i+size])
+			i += size
+			continue
+		}
+		run = append(run, s[i:i+size]...)
+		i += size
+	}
+	flush()
+	return b.String()
+}
+
+// escapeEnd returns the index just past the escape sequence starting at i.
+func escapeEnd(s string, i int) int {
+	if i+1 >= len(s) {
+		return len(s)
+	}
+	switch s[i+1] {
+	case '[': // CSI: params, then a final byte in 0x40..0x7E
+		j := i + 2
+		for j < len(s) && (s[j] < 0x40 || s[j] > 0x7E) {
+			j++
+		}
+		if j < len(s) {
+			j++
+		}
+		return j
+	case ']', '_', 'P': // OSC / APC / DCS: until BEL or ESC \
+		for j := i + 2; j < len(s); j++ {
+			if s[j] == 0x07 {
+				return j + 1
+			}
+			if s[j] == 0x1b && j+1 < len(s) && s[j+1] == '\\' {
+				return j + 2
+			}
+		}
+		return len(s)
+	default:
+		return i + 2
+	}
+}
+
+const placeholderRune = '\U0010EEEE'
+
+var diacriticSet = func() map[rune]bool {
+	m := make(map[rune]bool, len(diacritics))
+	for _, r := range diacritics {
+		m[r] = true
+	}
+	return m
+}()
+
+func isDiacritic(r rune) bool { return diacriticSet[r] }
 
 // entry is one image's state in the cache. An animated emote has more than one
 // frame; a static one has exactly one.

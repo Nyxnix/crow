@@ -26,14 +26,21 @@ const cardGutter = 2
 // cardHistory is how many of the user's own messages the card shows.
 const cardHistory = 12
 
-// UserInfo is the account/subscription detail the card shows beyond the local
-// message buffer, matching the top of Twitch's own mod card.
+// cardAvatarRows is how many cells tall the profile picture is drawn.
+const cardAvatarRows = 4
+
+// UserInfo is the account detail the card shows beyond the local message
+// buffer, matching the top of Twitch's own mod card. YouTube fills the shared
+// fields (CreatedAt, AvatarURL) plus Subscribers; the sub/follow fields are
+// Twitch-only.
 type UserInfo struct {
-	CreatedAt  time.Time
-	FollowedAt *time.Time // nil if not following or hidden
-	SubTier    string     // "1"/"2"/"3", empty if not subscribed
-	SubMonths  int
-	SubHidden  bool
+	CreatedAt   time.Time
+	AvatarURL   string     // profile picture, drawn when the terminal has graphics
+	FollowedAt  *time.Time // nil if not following or hidden
+	SubTier     string     // "1"/"2"/"3", empty if not subscribed
+	SubMonths   int
+	SubHidden   bool
+	Subscribers int // YouTube channel subscriber count; 0 = unknown/hidden
 }
 
 // InfoProvider fetches UserInfo for the card. It is nil when unavailable (for
@@ -52,9 +59,10 @@ type cardInfoLoaded struct {
 // card is the open user card: who it's about, the async-loaded account detail,
 // and the result of the last action taken from it.
 type card struct {
-	userID string
-	login  string
-	author string
+	userID   string
+	login    string
+	author   string
+	platform chat.Platform
 
 	// msgID is the message that was clicked, which is the one 'd' deletes.
 	msgID string
@@ -92,10 +100,11 @@ func (m *Model) openCard(msgIdx int) tea.Cmd {
 	}
 	src := m.lastRender[msgIdx]
 	m.card = &card{
-		userID: src.AuthorID,
-		login:  src.AuthorLogin,
-		author: src.Author,
-		msgID:  src.ID,
+		userID:   src.AuthorID,
+		login:    src.AuthorLogin,
+		author:   src.Author,
+		platform: src.Platform,
+		msgID:    src.ID,
 	}
 
 	if m.info == nil || src.AuthorLogin == "" {
@@ -264,6 +273,14 @@ func (m *Model) renderCardInfo() string {
 		lines = append(lines, s.cardLabel.Render("created ")+
 			c.info.CreatedAt.Format("Jan 2, 2006")+s.dim.Render(age))
 	}
+	if c.platform == chat.YouTube {
+		// YouTube has no follow/sub-tier equivalent; the channel's own
+		// subscriber count is the stat worth showing.
+		if c.info.Subscribers > 0 {
+			lines = append(lines, s.cardLabel.Render("subs ")+humanCount(c.info.Subscribers))
+		}
+		return strings.Join(lines, "\n")
+	}
 	if c.info.FollowedAt != nil {
 		lines = append(lines, s.cardLabel.Render("followed ")+
 			c.info.FollowedAt.Format("Jan 2, 2006"))
@@ -312,19 +329,30 @@ func (m *Model) renderCard(body string) string {
 
 	var b strings.Builder
 
+	// Profile picture, when loaded and the terminal has graphics. Drawn as a
+	// small block above the name, the same mechanism as the emote preview.
+	if m.gfx != nil && c.info != nil && c.info.AvatarURL != "" {
+		if lines, _, ok := m.gfx.RenderLarge(c.info.AvatarURL, cardAvatarRows); ok {
+			for _, ln := range lines {
+				b.WriteString(ln + "\n")
+			}
+		}
+	}
+
 	// Header: who this is, and what they are in this channel. Badges render as
 	// the same inline images as in chat (or the text tag as a fallback), taken
 	// from the most recent message we hold for them.
 	title := s.name(chat.Message{Author: c.author, Color: cardColor(history)}).Render(c.author)
 	if len(history) > 0 {
-		if seg, _ := renderBadges(history[len(history)-1], s, m.gfx); seg != "" {
+		if seg, _, _ := renderBadges(history[len(history)-1], s, m.gfx, 1); seg != "" {
 			title = seg + title
 		}
 	}
 	b.WriteString(title + "\n")
-	if c.login != "" && !strings.EqualFold(c.login, c.author) {
+	if c.login != "" && !strings.EqualFold(c.login, c.author) && c.platform != chat.YouTube {
 		// Display names can differ from the login (case, or a localized name);
-		// the login is what actually identifies them.
+		// the login is what actually identifies them. YouTube's "login" is the
+		// channel ID, which the id row below already shows.
 		b.WriteString(s.cardLabel.Render("@"+c.login) + "\n")
 	}
 	b.WriteString(s.cardLabel.Render("id "+c.userID) + "\n")

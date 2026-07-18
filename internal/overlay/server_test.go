@@ -137,3 +137,46 @@ func readData(t *testing.T, br *bufio.Reader) string {
 	t.Fatal("no data frame")
 	return ""
 }
+
+func TestSettingsSentOnConnectAndChange(t *testing.T) {
+	s := New()
+	s.SetOptions(map[string]int{"size": 20})
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	br := bufio.NewReader(resp.Body)
+
+	readEvent := func() string {
+		var ev strings.Builder
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				t.Fatalf("stream ended: %v", err)
+			}
+			if line == "\n" && ev.Len() > 0 {
+				return ev.String()
+			}
+			if line != "\n" && !strings.HasPrefix(line, ":") {
+				ev.WriteString(line)
+			}
+		}
+	}
+
+	// The current settings arrive before anything else.
+	if ev := readEvent(); !strings.Contains(ev, "event: settings") || !strings.Contains(ev, `"size":20`) {
+		t.Fatalf("first event = %q, want settings with size 20", ev)
+	}
+
+	// Unchanged options are not re-broadcast (the next frame read is the changed
+	// value, not a duplicate of the old one).
+	s.SetOptions(map[string]int{"size": 20})
+	s.SetOptions(map[string]int{"size": 28})
+	if ev := readEvent(); !strings.Contains(ev, `"size":28`) {
+		t.Fatalf("after change got %q, want size 28", ev)
+	}
+}

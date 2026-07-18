@@ -1,13 +1,17 @@
 package tui
 
 import (
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Nyxnix/crow/internal/chat"
 	"github.com/Nyxnix/crow/internal/config"
+	"github.com/Nyxnix/crow/internal/kitty"
 )
 
 // appMode is which screen the App is showing.
@@ -59,6 +63,21 @@ type App struct {
 	pollLogin   func(handle any) (login string, err error)
 	logout      func() // clears the stored token
 
+	// YouTube auth, used by the settings page, which exposes two independent
+	// methods. Cookie auth: ytVerify checks a pasted cookie header and returns
+	// the account name; ytCookiesAuthed/ytCookiesLogout report and clear it.
+	// Google OAuth (Data API): ytOAuthStart begins the device flow and returns a
+	// code plus opaque handle, ytOAuthPoll blocks until approved and returns the
+	// account name; ytOAuthAuthed/ytOAuthLogout report and clear it. Any nil hook
+	// disables its row.
+	ytVerify        func(cookies string) (name string, err error)
+	ytCookiesAuthed func() bool
+	ytCookiesLogout func()
+	ytOAuthStart    func(clientID, clientSecret string) (code, url string, handle any, err error)
+	ytOAuthPoll     func(handle any) (name string, err error)
+	ytOAuthAuthed   func() bool
+	ytOAuthLogout   func()
+
 	splash   splashState
 	settings settingsState
 
@@ -78,6 +97,14 @@ type AppOptions struct {
 	RequestCode func() (code, url string, handle any, err error)
 	PollLogin   func(handle any) (login string, err error)
 	Logout      func()
+
+	YTVerify        func(cookies string) (name string, err error)
+	YTCookiesAuthed func() bool
+	YTCookiesLogout func()
+	YTOAuthStart    func(clientID, clientSecret string) (code, url string, handle any, err error)
+	YTOAuthPoll     func(handle any) (name string, err error)
+	YTOAuthAuthed   func() bool
+	YTOAuthLogout   func()
 }
 
 func NewApp(o AppOptions) *App {
@@ -90,7 +117,14 @@ func NewApp(o AppOptions) *App {
 		requestCode: o.RequestCode,
 		pollLogin:   o.PollLogin,
 		logout:      o.Logout,
-		redraw:      make(chan struct{}, 1),
+		ytVerify:        o.YTVerify,
+		ytCookiesAuthed: o.YTCookiesAuthed,
+		ytCookiesLogout: o.YTCookiesLogout,
+		ytOAuthStart:    o.YTOAuthStart,
+		ytOAuthPoll:     o.YTOAuthPoll,
+		ytOAuthAuthed:   o.YTOAuthAuthed,
+		ytOAuthLogout:   o.YTOAuthLogout,
+		redraw:          make(chan struct{}, 1),
 	}
 	a.splash = newSplashState(o.Login != "")
 	if len(o.Channels) == 0 {
@@ -188,6 +222,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Splash's inline-login flow.
 	case deviceCodeMsg, tokenMsg, loginErrMsg:
 		return a.splashLoginUpdate(msg)
+
+	// Settings' YouTube login flows (cookie verify + OAuth device flow).
+	case ytCodeMsg, ytDoneMsg, ytErrMsg:
+		return a.ytLoginUpdate(msg)
 	}
 
 	// Anything else (cursor blink for the splash input) goes to the splash when
@@ -208,6 +246,8 @@ func (a *App) chatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+s":
 		a.mode = modeSettings
 		a.settings = newSettingsState(a.login, &a.cfg)
+		a.settings.ytCookiesAuthed = a.ytCookiesAuthed
+		a.settings.ytOAuthAuthed = a.ytOAuthAuthed
 		return a, nil
 	case "ctrl+t":
 		// Add-channel prompt: reuse the splash, returnable to chat on Esc.
@@ -291,6 +331,16 @@ func (a *App) onResize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// chatScale is the configured chat text scale, gated on the terminal actually
+// speaking the OSC 66 text sizing protocol (an unsupported terminal would
+// swallow the scaled text entirely).
+func (a *App) chatScale() int {
+	if a.cfg.ChatScale > 1 && kitty.TextSizing() {
+		return min(a.cfg.ChatScale, 7) // protocol scale cap
+	}
+	return 1
+}
+
 // chatHeight is the model viewport height, leaving a row for the tab bar.
 func (a *App) chatHeight() int {
 	h := a.height - tabBarHeight
@@ -300,10 +350,11 @@ func (a *App) chatHeight() int {
 	return h
 }
 
-// openTab opens a channel, makes it active, and returns its model's start
+// openTab opens a tab for a spec — a Twitch channel, a "yt:" YouTube target,
+// or several joined with "+" — makes it active, and returns its model's start
 // command (tagged). It switches to chat mode.
 func (a *App) openTab(channel string) tea.Cmd {
-	channel = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(channel)), "#")
+	channel, _ = chat.ParseSpec(channel)
 	if channel == "" {
 		return nil
 	}
@@ -317,6 +368,7 @@ func (a *App) openTab(channel string) tea.Cmd {
 	}
 
 	model, closeFn := a.open(channel)
+	model.scale = a.chatScale()
 	if a.width > 0 {
 		model.Update(tea.WindowSizeMsg{Width: a.width, Height: a.chatHeight()})
 	}
@@ -381,14 +433,42 @@ func (a *App) View() string {
 	if a.width == 0 {
 		return ""
 	}
+	var v string
 	switch a.mode {
 	case modeSplash:
-		return a.splashView()
+		v = a.splashView()
 	case modeSettings:
-		return a.settingsView()
+		v = a.settingsView()
 	default:
-		return a.chatView()
+		v = a.chatView()
 	}
+	if f := os.Getenv("CROW_DEBUG_FRAMES"); f != "" {
+		if n := strings.Count(v, "\n") + 1; n != a.height {
+			fmt.Fprintf(debugFile(f), "mode=%d lines=%d height=%d width=%d\n", a.mode, n, a.height, a.width)
+		}
+	}
+	// Never emit more lines than the window has rows. An over-tall frame makes
+	// bubbletea drop lines from the TOP, shifting everything down — and a
+	// scaled line pushed onto the bottom row makes kitty scroll to fit its
+	// two-row glyphs, permanently desyncing the screen. Dropping from the
+	// bottom instead keeps the frame top-anchored.
+	if lines := strings.Split(v, "\n"); len(lines) > a.height {
+		v = strings.Join(lines[:a.height], "\n")
+	}
+	// Autowrap off for the whole session (main re-enables it on exit): any row
+	// that still miscounts its width — terminals and go-runewidth disagree on
+	// plenty of emoji — clips at the edge instead of wrapping, which would
+	// scroll the screen and desync every absolutely-positioned cell.
+	return "\x1b[?7l" + v
+}
+
+var dbgFile *os.File
+
+func debugFile(path string) *os.File {
+	if dbgFile == nil {
+		dbgFile, _ = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	}
+	return dbgFile
 }
 
 // chatView draws the tab bar above the active tab's chat.
@@ -404,7 +484,7 @@ func (a *App) chatView() string {
 func (a *App) tabBar() string {
 	var b strings.Builder
 	for i, t := range a.tabs {
-		label := " #" + t.channel + " "
+		label := " " + specLabel(t.channel) + " "
 		if i == a.active {
 			b.WriteString(a.styles.tabActive.Render(label))
 		} else {

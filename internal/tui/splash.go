@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -28,8 +30,8 @@ type splashState struct {
 func newSplashState(loggedIn bool) splashState {
 	ti := textinput.New()
 	ti.Prompt = "channel › "
-	ti.Placeholder = "e.g. caedrel"
-	ti.CharLimit = 40
+	ti.Placeholder = "caedrel · yt:@handle · a+yt:b combined"
+	ti.CharLimit = 120
 	ti.Focus()
 	return splashState{input: ti, loggedIn: loggedIn}
 }
@@ -68,6 +70,12 @@ func (a *App) splashKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.splash.loggingIn = true
 		a.splash.loginErr = ""
 		return a, a.startLoginCmd()
+
+	case "ctrl+o":
+		if a.splash.loginURL != "" {
+			openBrowser(a.splash.loginURL)
+			return a, nil
+		}
 	}
 
 	var cmd tea.Cmd
@@ -99,6 +107,18 @@ func (a *App) splashLoginUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// openBrowser opens url in the default browser, fire-and-forget.
+func openBrowser(url string) {
+	switch runtime.GOOS {
+	case "darwin":
+		exec.Command("open", url).Start()
+	case "windows":
+		exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	default:
+		exec.Command("xdg-open", url).Start()
+	}
+}
+
 func (a *App) startLoginCmd() tea.Cmd {
 	return func() tea.Msg {
 		code, url, handle, err := a.requestCode()
@@ -124,7 +144,7 @@ func (a *App) splashView() string {
 	var b strings.Builder
 
 	b.WriteString(s.splashTitle.Render("Crow") + "\n")
-	b.WriteString(s.dim.Render("terminal Twitch chat with an OBS overlay") + "\n\n")
+	b.WriteString(s.dim.Render("terminal Twitch & YouTube chat with an OBS overlay") + "\n\n")
 
 	// Login status / inline login.
 	switch {
@@ -133,7 +153,8 @@ func (a *App) splashView() string {
 	case a.splash.loginCode != "":
 		b.WriteString(s.cardLabel.Render("to log in, open") + " " + a.splash.loginURL + "\n")
 		b.WriteString(s.cardLabel.Render("and enter code") + " " + s.key.Render(a.splash.loginCode) + "\n")
-		b.WriteString(s.dim.Render("waiting for approval…") + "\n\n")
+		b.WriteString(s.dim.Render("waiting for approval… ") +
+			s.key.Render("^O") + s.dim.Render(" to open in browser") + "\n\n")
 	case a.splash.loggingIn:
 		b.WriteString(s.dim.Render("starting login…") + "\n\n")
 	default:

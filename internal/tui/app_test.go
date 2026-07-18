@@ -129,3 +129,34 @@ func TestSettingsToggle(t *testing.T) {
 		t.Errorf("mode = %v, want chat after esc", a.mode)
 	}
 }
+
+func TestAppearanceSizeSavesPerKeystroke(t *testing.T) {
+	var saved []int
+	a := NewApp(AppOptions{Config: config.Default(), Save: func(c config.Config) { saved = append(saved, c.Overlay.Size) }})
+	a.mode = modeSettings
+	a.settings = newSettingsState("", &a.cfg)
+	a.settings.page = pageOverlay
+
+	rows := a.settings.rows[pageOverlay]
+	idx := -1
+	for i, r := range rows {
+		if r.label == "size (px)" {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatal("no size row on the overlay page")
+	}
+	a.settings.sel[pageOverlay] = idx
+	a.settings.refocus()
+
+	// Type "8" into the size field (default "20" -> "208"): the very keystroke
+	// must commit and save, so the overlay restyles live.
+	a.settingsKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'8'}})
+	if a.cfg.Overlay.Size != 208 {
+		t.Errorf("size = %d after keystroke, want 208", a.cfg.Overlay.Size)
+	}
+	if len(saved) == 0 || saved[len(saved)-1] != 208 {
+		t.Errorf("save calls = %v, want last one 208", saved)
+	}
+}

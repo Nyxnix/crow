@@ -26,6 +26,7 @@ import (
 	"github.com/Nyxnix/crow/internal/overlay"
 	"github.com/Nyxnix/crow/internal/tui"
 	"github.com/Nyxnix/crow/internal/twitch"
+	"github.com/Nyxnix/crow/internal/youtube"
 )
 
 func main() {
@@ -35,11 +36,20 @@ func main() {
 	// Subcommands come before flags: `crow login`, `crow logout`,
 	// `crow whoami`. Anything else is the default chat/overlay run.
 	if len(os.Args) > 1 {
+		yt := len(os.Args) > 2 && (os.Args[2] == "youtube" || os.Args[2] == "yt")
 		switch os.Args[1] {
 		case "login":
+			if yt {
+				exit(loginYouTube(ctx))
+				return
+			}
 			exit(login(ctx))
 			return
 		case "logout":
+			if yt {
+				exit(youtube.ClearToken())
+				return
+			}
 			exit(logout())
 			return
 		case "whoami":
@@ -51,15 +61,15 @@ func main() {
 		}
 	}
 
-	channel := flag.String("channel", "", "Twitch channel(s) to open, comma-separated; omit to start on the splash")
+	channel := flag.String("channel", "", "chats to open, comma-separated: a Twitch channel, yt:<handle|video|url> for YouTube, or a+yt:b to combine sources in one tab")
 	addr := flag.String("addr", "", "address for the overlay server (overrides the saved config)")
 	headless := flag.Bool("headless", false, "serve the overlay without the terminal UI (needs -channel)")
 	flag.Parse()
 
 	var channels []string
 	for _, c := range strings.Split(*channel, ",") {
-		if c = strings.TrimSpace(c); c != "" {
-			channels = append(channels, strings.ToLower(strings.TrimPrefix(c, "#")))
+		if canon, _ := chat.ParseSpec(c); canon != "" {
+			channels = append(channels, canon)
 		}
 	}
 
@@ -74,7 +84,8 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  crow [-channel a,b,c] [-addr host:port] [-headless]")
-	fmt.Fprintln(os.Stderr, "  crow login | logout | whoami")
+	fmt.Fprintln(os.Stderr, "  crow login | logout | whoami       (Twitch)")
+	fmt.Fprintln(os.Stderr, "  crow login youtube | logout youtube")
 }
 
 func exit(err error) {
@@ -94,6 +105,7 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 	// switching tabs never disrupts the stream. Headless mode is overlay-only, so
 	// it serves regardless of the toggle.
 	ov := overlay.New()
+	ov.SetOptions(cfg.Overlay)
 	if cfg.OverlayEnabled || headless {
 		ln, err := net.Listen("tcp", cfg.OverlayAddr)
 		if err != nil {
@@ -102,10 +114,18 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 		srv := &http.Server{Handler: ov.Handler()}
 		go srv.Serve(ln)
 		defer srv.Close()
+		// Push config-file edits to connected browser sources as they happen, so
+		// the overlay restyles without touching OBS. Polling mtime keeps it
+		// dependency-free; the TUI's own saves push directly and this is a no-op.
+		go watchConfig(ctx, ov)
 	}
 
+	// Normalize the pinned overlay channel the same way tab specs are, so a
+	// pin like "caedrel+yt:@LofiGirl" matches the tab that claims it (YouTube
+	// parts are case-sensitive; a plain ToLower would never match).
+	confSpec, _ := chat.ParseSpec(cfg.OverlayChannel)
 	ovState := &overlayState{
-		configured: strings.ToLower(cfg.OverlayChannel),
+		configured: confSpec,
 		enabled:    cfg.OverlayEnabled || headless,
 	}
 
@@ -137,16 +157,53 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 		Factory:     factory,
 		Login:       login,
 		Config:      cfg,
-		Save:        func(c config.Config) { config.Save(c) },
+		Save: func(c config.Config) {
+			config.Save(c)
+			ov.SetOptions(c.Overlay) // restyle connected browser sources live
+		},
 		Channels:    initial,
 		RequestCode: requestDeviceCode,
 		PollLogin:   pollLogin,
 		Logout:      func() { auth.Clear() },
+		YTVerify:        ytVerifyCookies,
+		YTCookiesAuthed: func() bool { return config.Load().YouTubeCookies != "" },
+		YTCookiesLogout: ytClearCookies,
+		YTOAuthStart:    ytRequestDeviceCode,
+		YTOAuthPoll:     ytPollLogin,
+		YTOAuthAuthed:   func() bool { t, _ := youtube.LoadToken(); return t != nil },
+		YTOAuthLogout:   func() { youtube.ClearToken() },
 	})
 
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
 	_, err := p.Run()
+	fmt.Print("\x1b[?7h") // re-enable autowrap; the TUI disables it while drawing
 	return err
+}
+
+// watchConfig polls the config file's mtime and pushes the overlay options to
+// connected browser sources when it changes, so hand-editing the file restyles
+// the overlay live. ponytail: 2s mtime polling over fsnotify — no new
+// dependency, and a human editing a file can't feel two seconds.
+func watchConfig(ctx context.Context, ov *overlay.Server) {
+	var last time.Time
+	if st, err := os.Stat(config.Path()); err == nil {
+		last = st.ModTime()
+	}
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			st, err := os.Stat(config.Path())
+			if err != nil || st.ModTime().Equal(last) {
+				continue
+			}
+			last = st.ModTime()
+			ov.SetOptions(config.Load().Overlay)
+		}
+	}
 }
 
 // overlayState tracks which channel currently feeds the overlay. Only one does,
@@ -184,15 +241,27 @@ func (o *overlayState) release(channel string) {
 	}
 }
 
-// openChannel wires one channel's reader, sender, registries, stats and chat
-// model under a sub-context that its returned close func cancels.
-func openChannel(parent context.Context, channel string, ov *overlay.Server, ovState *overlayState, redraw func()) (*tui.Model, func()) {
-	ctx, cancel := context.WithCancel(parent)
+// sourceFeed is one running source's output streams, plus the registries its
+// messages need applied (Twitch third-party emotes/badges; nil for YouTube,
+// whose messages carry their emotes inline).
+type sourceFeed struct {
+	msgs   chan chat.Message
+	events chan chat.ModEvent
+	emotes *emote.Registry
+	badges *badge.Registry
+}
 
-	// Reload the session per open, so a login completed on the splash applies to
-	// channels opened afterwards.
-	session := loadSession(ctx)
-	toOverlay := ovState.claim(channel)
+// startSource starts one platform reader under ctx and returns its feed. The
+// caller pumps the channels; they close when ctx ends.
+func startSource(ctx context.Context, src chat.Source, session *auth.StoredToken) sourceFeed {
+	out := make(chan chat.Message, 256)
+	events := make(chan chat.ModEvent, 64)
+
+	if src.Platform == chat.YouTube {
+		yc := &youtube.Client{Channel: src.Channel, Out: out, Events: events}
+		go yc.Run(ctx)
+		return sourceFeed{msgs: out, events: events}
+	}
 
 	emotes := emote.New()
 	var badgeToken string
@@ -200,15 +269,11 @@ func openChannel(parent context.Context, channel string, ov *overlay.Server, ovS
 		badgeToken = session.AccessToken
 	}
 	badges := badge.New(clientID(), badgeToken)
-
-	fromIRC := make(chan chat.Message, 256)
-	modIRC := make(chan chat.ModEvent, 64)
-
 	var loadOnce sync.Once
 	reader := &twitch.Client{
-		Channel: channel,
-		Out:     fromIRC,
-		Events:  modIRC,
+		Channel: src.Channel,
+		Out:     out,
+		Events:  events,
 		OnRoomID: func(id string) {
 			loadOnce.Do(func() {
 				go func() {
@@ -225,27 +290,93 @@ func openChannel(parent context.Context, channel string, ov *overlay.Server, ovS
 		},
 	}
 	go reader.Run(ctx)
+	return sourceFeed{msgs: out, events: events, emotes: emotes, badges: badges}
+}
 
-	var sendFn func(string)
-	if session != nil {
-		sender := &twitch.Client{Channel: channel, Nick: session.Login, Token: session.AccessToken, Out: make(chan chat.Message, 16)}
-		go sender.Run(ctx)
-		go func() {
-			for range sender.Out {
-			}
-		}()
-		sendFn = sender.Send
+// applyRegistries decorates a Twitch message with third-party emotes and badge
+// URLs; a YouTube feed has no registries and passes through untouched.
+func (f sourceFeed) apply(m *chat.Message) {
+	if f.emotes != nil {
+		f.emotes.Apply(m)
+	}
+	if f.badges != nil {
+		f.badges.Resolve(m)
+	}
+}
+
+// openChannel wires a tab's sources (one Twitch channel, a YouTube stream, or
+// several of either combined with "+") into one chat model, under a
+// sub-context that its returned close func cancels.
+func openChannel(parent context.Context, spec string, ov *overlay.Server, ovState *overlayState, redraw func()) (*tui.Model, func()) {
+	ctx, cancel := context.WithCancel(parent)
+
+	// Reload the session per open, so a login completed on the splash applies to
+	// channels opened afterwards.
+	session := loadSession(ctx)
+	spec, sources := chat.ParseSpec(spec)
+	toOverlay := ovState.claim(spec)
+
+	feeds := make([]sourceFeed, len(sources))
+	for i, s := range sources {
+		feeds[i] = startSource(ctx, s, session)
 	}
 
-	var poller *twitch.StreamPoller
+	// Sending, moderation, user info and stream stats are Twitch APIs tied to a
+	// single channel, so only a plain one-Twitch-channel tab gets them; combined
+	// and YouTube tabs are read-only.
+	single := len(sources) == 1 && sources[0].Platform == chat.Twitch
+	var sendFn func(string)
+	var mod tui.Moderator
 	var statsFn func() tui.StreamStats
-	if session != nil {
-		poller = &twitch.StreamPoller{ClientID: clientID(), Token: session.AccessToken, Login: channel, Interval: time.Minute, OnUpdate: redraw}
-		statsFn = func() tui.StreamStats {
-			s := poller.Snapshot()
-			return tui.StreamStats{Live: s.Live, Viewers: s.Viewers, AvgViewers: s.AvgViewers, Uptime: s.Uptime}
+	var info tui.InfoProvider
+	var emotes *emote.Registry
+	if single {
+		channel := sources[0].Channel
+		emotes = feeds[0].emotes
+		info = infoProvider{&ivr.Client{}}
+		mod = buildModerator(ctx, channel, session)
+		if session != nil {
+			sender := &twitch.Client{Channel: channel, Nick: session.Login, Token: session.AccessToken, Out: make(chan chat.Message, 16)}
+			go sender.Run(ctx)
+			go func() {
+				for range sender.Out {
+				}
+			}()
+			sendFn = sender.Send
+
+			poller := &twitch.StreamPoller{ClientID: clientID(), Token: session.AccessToken, Login: channel, Interval: time.Minute, OnUpdate: redraw}
+			statsFn = func() tui.StreamStats {
+				s := poller.Snapshot()
+				return tui.StreamStats{Live: s.Live, Viewers: s.Viewers, AvgViewers: s.AvgViewers, Uptime: s.Uptime}
+			}
+			go poller.Run(ctx)
 		}
-		go poller.Run(ctx)
+	}
+	// A single YouTube tab gets a send box, user-card info and mod actions once
+	// the user has authed in settings (cookies) or `crow login youtube`
+	// (OAuth). YouTube rejects mod calls from non-moderators, which the card
+	// surfaces just like Helix rejections.
+	sendLimit := 0
+	var observe func(chat.Message) // CookieMod needs to see messages for their tokens
+	if len(sources) == 1 && sources[0].Platform == chat.YouTube {
+		if s := youtubeSession(sources[0].Channel); s.send != nil {
+			sendLimit = 200 // YouTube's chat message cap
+			sendFn = func(text string) {
+				go func() {
+					sctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+					defer cancel()
+					if err := s.send(sctx, text); err != nil {
+						log.Printf("youtube send: %v", err)
+					}
+				}()
+			}
+			mod = s.mod
+			info = s.info
+			observe = s.observe
+		}
+	}
+	if sendFn == nil && os.Getenv("CROW_FAKE_INPUT") == "1" {
+		sendFn = func(string) {} // debug: show the input line without a login
 	}
 
 	var clientsFn func() int
@@ -254,80 +385,115 @@ func openChannel(parent context.Context, channel string, ov *overlay.Server, ovS
 	}
 
 	model := tui.NewModel(tui.Options{
-		Channel:  channel,
-		Emotes:   emotes,
-		Mod:      buildModerator(ctx, channel, session),
-		Info:     infoProvider{&ivr.Client{}},
-		Clients:  clientsFn,
-		Stats:    statsFn,
-		Send:     sendFn,
-		OnRedraw: redraw,
+		Channel:   spec,
+		Emotes:    emotes,
+		Mod:       mod,
+		Info:      info,
+		Clients:   clientsFn,
+		Stats:     statsFn,
+		Send:      sendFn,
+		SendLimit: sendLimit,
+		OnRedraw:  redraw,
 	})
 
-	// Ingest chat: apply emotes/badges, publish to the overlay if this channel
-	// owns it, and append to the model.
-	go func() {
-		for m := range fromIRC {
-			emotes.Apply(&m)
-			badges.Resolve(&m)
-			if toOverlay {
-				ov.Publish(m)
+	// Ingest every source into the one model: apply registries, publish to the
+	// overlay if this tab owns it, and append. Moderation likewise.
+	for _, f := range feeds {
+		f := f
+		go func() {
+			for m := range f.msgs {
+				f.apply(&m)
+				if observe != nil {
+					observe(m) // record YouTube moderation tokens
+				}
+				if toOverlay {
+					ov.Publish(m)
+				}
+				model.Append(m)
 			}
-			model.Append(m)
-		}
-	}()
-	// Ingest moderation: remove from the overlay, strike through in the model.
-	go func() {
-		for ev := range modIRC {
-			if toOverlay {
-				ov.Remove(ev)
+		}()
+		go func() {
+			for ev := range f.events {
+				if toOverlay {
+					ov.Remove(ev)
+				}
+				model.ApplyModEvent(ev)
 			}
-			model.ApplyModEvent(ev)
-		}
-	}()
+		}()
+	}
 
 	return model, func() {
 		cancel()
-		ovState.release(channel)
+		ovState.release(spec)
 	}
 }
 
-// runHeadless serves the overlay for one channel with no terminal UI.
-func runHeadless(ctx context.Context, channel, addr string, ov *overlay.Server, ovState *overlayState) error {
-	ovState.claim(channel)
-	emotes := emote.New()
-	session := loadSession(ctx)
-	var badgeToken string
-	if session != nil {
-		badgeToken = session.AccessToken
-	}
-	badges := badge.New(clientID(), badgeToken)
+// ytSession bundles a YouTube tab's authenticated capabilities. send/mod/info
+// are nil when the user hasn't authed; observe is set only for cookie mode,
+// where the mod needs to see messages for their per-message tokens.
+type ytSession struct {
+	send    func(context.Context, string) error
+	mod     tui.Moderator
+	info    tui.InfoProvider
+	observe func(chat.Message)
+}
 
-	fromIRC := make(chan chat.Message, 256)
-	modIRC := make(chan chat.ModEvent, 64)
-	var loadOnce sync.Once
-	reader := &twitch.Client{
-		Channel: channel, Out: fromIRC, Events: modIRC,
-		OnRoomID: func(id string) {
-			loadOnce.Do(func() {
-				go emotes.Load(ctx, id)
-				go badges.Load(ctx, id)
-			})
-		},
-	}
-	go reader.Run(ctx)
-	go func() {
-		for ev := range modIRC {
-			ov.Remove(ev)
+// youtubeSession picks the best available YouTube auth for a stream: cookie
+// auth (the primary, quota-free path) if the user pasted cookies, else the
+// OAuth/Data-API path if they ran `crow login youtube`, else an empty session.
+func youtubeSession(target string) ytSession {
+	cfg := config.Load()
+
+	if ca := (&youtube.CookieAuth{Cookies: cfg.YouTubeCookies}); ca.Valid() {
+		sender := &youtube.CookieSender{Video: target, Auth: ca}
+		cmod := &youtube.CookieMod{Sender: sender}
+		return ytSession{
+			send:    sender.Send,
+			mod:     cmod,
+			info:    ytCookieInfo{ca},
+			observe: cmod.Observe,
 		}
-	}()
-
-	log.Printf("overlay: http://%s", addr)
-	for m := range fromIRC {
-		emotes.Apply(&m)
-		badges.Resolve(&m)
-		ov.Publish(m)
 	}
+
+	if cfg.YouTubeClientID != "" && cfg.YouTubeClientSecret != "" {
+		if tok, err := youtube.LoadToken(); err == nil && tok != nil {
+			ya := &youtube.Auth{ClientID: cfg.YouTubeClientID, ClientSecret: cfg.YouTubeClientSecret}
+			sender := &youtube.Sender{Video: target, Auth: ya}
+			return ytSession{send: sender.Send, mod: &youtube.Mod{Sender: sender}, info: ytInfoProvider{auth: ya}}
+		}
+	}
+	return ytSession{}
+}
+
+// ytCookieInfo serves the user card for cookie-auth YouTube tabs.
+type ytCookieInfo struct{ auth *youtube.CookieAuth }
+
+func (p ytCookieInfo) CardInfo(ctx context.Context, userLogin, _ string) (tui.UserInfo, error) {
+	ci, err := p.auth.ChannelInfo(ctx, userLogin)
+	return tui.UserInfo{CreatedAt: ci.Created, AvatarURL: ci.AvatarURL, Subscribers: ci.Subs}, err
+}
+
+// runHeadless serves the overlay for one tab spec with no terminal UI.
+func runHeadless(ctx context.Context, spec, addr string, ov *overlay.Server, ovState *overlayState) error {
+	spec, sources := chat.ParseSpec(spec)
+	ovState.claim(spec)
+	session := loadSession(ctx)
+	for _, src := range sources {
+		f := startSource(ctx, src, session)
+		go func() {
+			for ev := range f.events {
+				ov.Remove(ev)
+			}
+		}()
+		go func() {
+			for m := range f.msgs {
+				f.apply(&m)
+				ov.Publish(m)
+			}
+		}()
+	}
+	log.Printf("overlay: http://%s", addr)
+	<-ctx.Done()
 	return nil
 }
 
@@ -364,6 +530,64 @@ func pollLogin(handle any) (login string, err error) {
 	return name, nil
 }
 
+// ytVerifyCookies checks a pasted youtube.com cookie header by fetching the
+// account name. The settings page has already saved the cookies to the config
+// (so a tab opened right after picks them up); this just proves they work.
+func ytVerifyCookies(cookies string) (name string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return (&youtube.CookieAuth{Cookies: cookies}).WhoAmI(ctx)
+}
+
+// ytClearCookies logs out of YouTube by dropping the stored cookies.
+func ytClearCookies() {
+	cfg := config.Load()
+	cfg.YouTubeCookies = ""
+	config.Save(cfg)
+}
+
+// ytHandle carries the OAuth client and device code between the settings
+// page's two device-flow steps.
+type ytHandle struct {
+	auth *youtube.Auth
+	dc   *youtube.DeviceCode
+}
+
+// ytRequestDeviceCode / ytPollLogin drive the settings page's Google OAuth
+// login, the same two-step shape as the Twitch device flow. The client
+// id/secret are already committed to the config by the settings save; the
+// verified token is written to disk by ytPollLogin.
+func ytRequestDeviceCode(clientID, clientSecret string) (code, url string, handle any, err error) {
+	ya := &youtube.Auth{ClientID: clientID, ClientSecret: clientSecret}
+	dc, err := ya.RequestDeviceCode(context.Background())
+	if err != nil {
+		return "", "", nil, err
+	}
+	return dc.UserCode, dc.VerificationURL, &ytHandle{auth: ya, dc: dc}, nil
+}
+
+func ytPollLogin(handle any) (name string, err error) {
+	h, ok := handle.(*ytHandle)
+	if !ok {
+		return "", fmt.Errorf("bad login handle")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	tok, err := h.auth.PollToken(ctx, h.dc)
+	if err != nil {
+		return "", err
+	}
+	// Identify the account; this also proves the token works before saving.
+	name, err = h.auth.WhoAmI(ctx, tok.AccessToken)
+	if err != nil {
+		return "", err
+	}
+	if err := youtube.SaveToken(tok); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
 // infoProvider adapts the IVR client to the TUI's InfoProvider interface,
 // translating ivr.CardInfo into the card's UserInfo. This keeps the tui package
 // from importing ivr.
@@ -373,10 +597,25 @@ func (p infoProvider) CardInfo(ctx context.Context, userLogin, channel string) (
 	i, err := p.c.CardInfo(ctx, userLogin, channel)
 	return tui.UserInfo{
 		CreatedAt:  i.CreatedAt,
+		AvatarURL:  i.AvatarURL,
 		FollowedAt: i.FollowedAt,
 		SubTier:    i.SubTier,
 		SubMonths:  i.SubMonths,
 		SubHidden:  i.SubHidden,
+	}, err
+}
+
+// ytInfoProvider serves the user card for YouTube tabs from the Data API.
+// The channel argument is unused: a YouTube author is identified globally by
+// their channel ID, which arrives as the card's "login".
+type ytInfoProvider struct{ auth *youtube.Auth }
+
+func (p ytInfoProvider) CardInfo(ctx context.Context, userLogin, _ string) (tui.UserInfo, error) {
+	ci, err := p.auth.ChannelInfo(ctx, userLogin)
+	return tui.UserInfo{
+		CreatedAt:   ci.Created,
+		AvatarURL:   ci.AvatarURL,
+		Subscribers: ci.Subs,
 	}, err
 }
 

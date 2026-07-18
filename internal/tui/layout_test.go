@@ -81,7 +81,7 @@ func TestWrapDegenerateWidth(t *testing.T) {
 
 func TestLayoutRecordsNameHit(t *testing.T) {
 	msgs := []chat.Message{{Author: "nyx", Text: "hello"}}
-	lines := layout(msgs, 40, newStyles(), nil)
+	lines := layout(msgs, 40, newStyles(), nil, 1)
 
 	if len(lines) != 1 {
 		t.Fatalf("got %d lines, want 1", len(lines))
@@ -100,7 +100,7 @@ func TestLayoutRecordsNameHit(t *testing.T) {
 // for anyone with a CJK display name.
 func TestLayoutHitBoxIsDisplayWidth(t *testing.T) {
 	msgs := []chat.Message{{Author: "日本語", Text: "hi"}}
-	lines := layout(msgs, 40, newStyles(), nil)
+	lines := layout(msgs, 40, newStyles(), nil, 1)
 
 	h := lines[0].hit
 	if h == nil {
@@ -115,8 +115,8 @@ func TestLayoutHitBoxIsDisplayWidth(t *testing.T) {
 // A role marker is printed before the name, so the hit box must shift right by
 // its width. Without this, clicking a broadcaster or mod's name lands short.
 func TestLayoutHitBoxShiftsPastRoleTag(t *testing.T) {
-	plain := layout([]chat.Message{{Author: "nyx", Text: "hi"}}, 40, newStyles(), nil)
-	tagged := layout([]chat.Message{{Author: "nyx", Text: "hi", Broadcaster: true}}, 40, newStyles(), nil)
+	plain := layout([]chat.Message{{Author: "nyx", Text: "hi"}}, 40, newStyles(), nil, 1)
+	tagged := layout([]chat.Message{{Author: "nyx", Text: "hi", Broadcaster: true}}, 40, newStyles(), nil, 1)
 
 	ph, th := plain[0].hit, tagged[0].hit
 	if ph == nil || th == nil {
@@ -142,7 +142,7 @@ func TestLayoutHitsAcrossWrappedMessages(t *testing.T) {
 		{Author: "a", Text: strings.Repeat("word ", 20)},
 		{Author: "b", Text: "short"},
 	}
-	lines := layout(msgs, 30, newStyles(), nil)
+	lines := layout(msgs, 30, newStyles(), nil, 1)
 
 	var hits []hit
 	for _, l := range lines {
@@ -170,7 +170,7 @@ func TestLayoutHitsAcrossWrappedMessages(t *testing.T) {
 func TestRenderBadgesTextFallback(t *testing.T) {
 	s := newStyles()
 	// A broadcaster with no graphics cache: the [B] tag stands in.
-	str, w := renderBadges(chat.Message{Broadcaster: true}, s, nil)
+	str, w, _ := renderBadges(chat.Message{Broadcaster: true}, s, nil, 1)
 	if !strings.Contains(str, "[B]") {
 		t.Errorf("fallback = %q, want the [B] tag", str)
 	}
@@ -179,7 +179,7 @@ func TestRenderBadgesTextFallback(t *testing.T) {
 	}
 
 	// A plain user contributes no badge segment.
-	if str, w := renderBadges(chat.Message{}, s, nil); str != "" || w != 0 {
+	if str, w, _ := renderBadges(chat.Message{}, s, nil, 1); str != "" || w != 0 {
 		t.Errorf("plain user badges = (%q, %d), want empty", str, w)
 	}
 }
@@ -223,7 +223,7 @@ func TestPackTokens(t *testing.T) {
 		{str: "aaa", w: 3}, {str: "bbb", w: 3}, {str: "ccc", w: 3},
 	}
 	// Width 7 fits "aaa bbb" (7) then "ccc".
-	lines, _ := packTokens(toks, 7, 7)
+	lines, _ := packTokens(toks, 7, 7, 1)
 	if len(lines) != 2 || lines[0] != "aaa bbb" || lines[1] != "ccc" {
 		t.Errorf("got %q, want [aaa bbb, ccc]", lines)
 	}
@@ -237,7 +237,7 @@ func TestPackTokensReportsEmoteSpans(t *testing.T) {
 		{str: "word", w: 4},
 		{str: "\x1bIMG\x1b", w: 2, emote: e},
 	}
-	lines, spans := packTokens(toks, 40, 40)
+	lines, spans := packTokens(toks, 40, 40, 1)
 	if len(lines) != 1 || len(spans) != 1 || len(spans[0]) != 1 {
 		t.Fatalf("got %d lines / spans %v, want one line with one span", len(lines), spans)
 	}
@@ -257,7 +257,7 @@ func TestPackTokensUsesDeclaredWidth(t *testing.T) {
 	}
 	// Budget 6: "word" (4) + emote (2) = 6 fits with a space? 4+1+2=7 > 6, so
 	// the emote wraps. Then emote(2)+space+next(4)=7 > 6, next wraps too.
-	lines, _ := packTokens(toks, 6, 6)
+	lines, _ := packTokens(toks, 6, 6, 1)
 	if len(lines) != 3 {
 		t.Fatalf("got %d lines, want 3 (declared widths respected): %q", len(lines), lines)
 	}
@@ -271,7 +271,7 @@ func TestLayoutBodyEmotesFallsBackToName(t *testing.T) {
 		Text:   "gg Kappa",
 		Emotes: []chat.Emote{{Name: "Kappa", URL: "https://cdn/never-loads", Start: 3, End: 8}},
 	}
-	lines, _ := layoutBodyEmotes(m, 40, 40, newStyles(), gfx)
+	lines, _ := layoutBodyEmotes(m, 40, 40, newStyles(), gfx, 1)
 	joined := strings.Join(lines, " ")
 	if !strings.Contains(joined, "Kappa") {
 		t.Errorf("unloaded emote not shown as its name: %q", lines)
@@ -292,7 +292,7 @@ func TestTimestampFormat(t *testing.T) {
 // The timestamp is rendered before the name, and the name stays clickable.
 func TestLayoutRendersTimestamp(t *testing.T) {
 	at := time.Date(2026, 7, 17, 14, 30, 0, 0, time.UTC)
-	lines := layout([]chat.Message{{Author: "nyx", Text: "hi", At: at}}, 40, newStyles(), nil)
+	lines := layout([]chat.Message{{Author: "nyx", Text: "hi", At: at}}, 40, newStyles(), nil, 1)
 	if !strings.Contains(lines[0].text, "14:30") {
 		t.Errorf("line %q missing the timestamp", lines[0].text)
 	}
@@ -304,7 +304,7 @@ func TestLayoutRendersTimestamp(t *testing.T) {
 func TestLayoutNarrowWidthDoesNotPanic(t *testing.T) {
 	msgs := []chat.Message{{Author: "averylongusernameindeed", Text: "some text here"}}
 	for _, w := range []int{1, 5, 10, 21} {
-		lines := layout(msgs, w, newStyles(), nil)
+		lines := layout(msgs, w, newStyles(), nil, 1)
 		if len(lines) == 0 {
 			t.Errorf("width %d produced nothing", w)
 		}
@@ -326,3 +326,20 @@ func eq(a, b []string) bool {
 // timeout returns a channel that fires after a short deadline, used to catch
 // non-terminating layout code rather than hanging the whole test run.
 func timeout() <-chan time.Time { return time.After(2 * time.Second) }
+
+func TestLayoutScaled(t *testing.T) {
+	msgs := []chat.Message{{Author: "nyx", Text: "hi"}}
+	lines := layout(msgs, 80, newStyles(), nil, 2)
+	if len(lines) != 1 {
+		t.Fatalf("want 1 line, got %d", len(lines))
+	}
+	if !strings.Contains(lines[0].text, "\x1b]66;s=2;") {
+		t.Errorf("scaled line missing OSC 66 wrapping: %q", lines[0].text)
+	}
+	// Every width doubles: the "HH:MM " timestamp is 6 logical cells, so the
+	// name's hit box starts at column 12 and spans 2 cells per glyph.
+	h := lines[0].hit
+	if h == nil || h.x0 != 12 || h.x1 != 12+len("nyx")*2 {
+		t.Errorf("hit box not scaled: %+v", h)
+	}
+}

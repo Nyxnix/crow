@@ -120,8 +120,6 @@
   "use strict";
 
   const q = new URLSearchParams(location.search);
-  const bool = (k, dflt) => q.has(k) ? !/^(0|false|no|off)$/i.test(q.get(k)) : dflt;
-  const num  = (k, dflt) => { const n = parseFloat(q.get(k)); return Number.isFinite(n) ? n : dflt; };
 
   const FONTS = [
     '"Inter", "Segoe UI", system-ui, sans-serif',
@@ -131,28 +129,49 @@
     'ui-monospace, "Cascadia Code", "Fira Code", monospace',
   ];
 
-  const cfg = {
-    fade:      num("fade", 0),           // seconds before a message fades; 0 = never
-    animate:   bool("animate", true),
-    size:      num("size", 20),          // px
-    stroke:    num("stroke", 2),         // px of outline
-    font:      FONTS[num("font", 0)] || FONTS[0],
-    badges:    bool("badges", true),
-    hideCmds:  bool("hide_commands", false),
-    align:     q.get("align") === "top" ? "top" : "bottom",
-    // Cap the DOM. A browser source left running for a nine-hour stream would
-    // otherwise accumulate every message ever sent.
-    max:       Math.max(1, num("max", 50)),
-    bots:      new Set((q.get("bots") || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean)),
+  // Keys and defaults match config.OverlayOptions' JSON. Settings arrive from
+  // the server over SSE (on connect and whenever they change), so a bare
+  // http://…:7788/ needs no query params; params still win when present, so
+  // URLs from before server-pushed settings keep behaving as saved.
+  const defaults = {
+    align: "bottom", font: 0, size: 20, stroke: 2, fade: 0, max: 50,
+    animate: true, badges: true, hide_commands: false, bots: "",
   };
 
-  const root = document.documentElement;
-  root.style.setProperty("--size", cfg.size + "px");
-  root.style.setProperty("--stroke", cfg.stroke + "px");
-  root.style.setProperty("--font", cfg.font);
-
   const chat = document.getElementById("chat");
-  if (cfg.align === "top") chat.classList.add("top");
+  const root = document.documentElement;
+  let cfg;
+
+  function applySettings(server) {
+    const s = { ...defaults, ...(server || {}) };
+    for (const k of Object.keys(defaults)) {
+      if (!q.has(k)) continue;
+      const d = defaults[k];
+      if (typeof d === "boolean") s[k] = !/^(0|false|no|off)$/i.test(q.get(k));
+      else if (typeof d === "number") { const n = parseFloat(q.get(k)); if (Number.isFinite(n)) s[k] = n; }
+      else s[k] = q.get(k);
+    }
+    cfg = {
+      fade:     s.fade,                     // seconds before a message fades; 0 = never
+      animate:  s.animate,
+      size:     s.size,                     // px
+      stroke:   s.stroke,                   // px of outline
+      font:     FONTS[s.font] || FONTS[0],
+      badges:   s.badges,
+      hideCmds: s.hide_commands,
+      align:    s.align === "top" ? "top" : "bottom",
+      // Cap the DOM. A browser source left running for a nine-hour stream would
+      // otherwise accumulate every message ever sent.
+      max:      Math.max(1, s.max),
+      bots:     new Set(String(s.bots || "").toLowerCase().split(",").map(x => x.trim()).filter(Boolean)),
+    };
+    root.style.setProperty("--size", cfg.size + "px");
+    root.style.setProperty("--stroke", cfg.stroke + "px");
+    root.style.setProperty("--font", cfg.font);
+    chat.classList.toggle("top", cfg.align === "top");
+    while (chat.children.length > cfg.max) chat.firstChild.remove();
+  }
+  applySettings(null); // defaults + URL params until the server's settings land
 
   // Twitch's own fallback palette, used for chatters who never picked a color.
   // Hashing the name keeps a given person the same color across reconnects.
@@ -290,6 +309,13 @@
       removeMessages(JSON.parse(ev.data));
     } catch (err) {
       console.error("crow: bad remove", err);
+    }
+  });
+  es.addEventListener("settings", (ev) => {
+    try {
+      applySettings(JSON.parse(ev.data));
+    } catch (err) {
+      console.error("crow: bad settings", err);
     }
   });
 })();
