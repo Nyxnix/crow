@@ -5,6 +5,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -199,6 +200,18 @@ func NewModel(o Options) *Model {
 		send:             o.Send,
 		input:            ti,
 		onRedraw:         onRedraw,
+	}
+	// Debug: show a static poll block without a login, like CROW_FAKE_INPUT
+	// does for the input line.
+	if os.Getenv("CROW_FAKE_POLL") == "1" {
+		m.vote = &chat.Poll{
+			Kind: "poll", Title: "Favorite emote?", Status: "ACTIVE",
+			EndsAt: time.Now().Add(90 * time.Second),
+			Choices: []chat.PollChoice{
+				{Title: "Kappa", Votes: 27},
+				{Title: "PogChamp", Votes: 9},
+			},
+		}
 	}
 	if kitty.Supported() {
 		// One cache for the whole process, not per tab: every tab shares the
