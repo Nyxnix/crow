@@ -61,6 +61,10 @@ type Model struct {
 	stats   func() StreamStats // live viewer/uptime stats, nil to hide
 	clients func() int         // connected overlay browser sources
 
+	// overlayUnclaimed reports that the overlay is pinned but no open tab
+	// matched the pin, so it is silently blank; nil to skip the warning.
+	overlayUnclaimed func() bool
+
 	// send delivers a typed message to Twitch. Nil when not logged in, which is
 	// also what decides whether the input line is shown and focused.
 	send  func(string)
@@ -90,6 +94,10 @@ type Options struct {
 	Mod     Moderator
 	Info    InfoProvider
 	Clients func() int
+
+	// OverlayUnclaimed reports that the overlay pin matches no open tab, which
+	// the status bar warns about. Leave nil to omit the check.
+	OverlayUnclaimed func() bool
 
 	// Stats returns the channel's live viewer count, uptime and session average
 	// for the status bar. Leave nil to omit them.
@@ -134,6 +142,8 @@ func NewModel(o Options) *Model {
 		info:     o.Info,
 		stats:    o.Stats,
 		clients:  o.Clients,
+
+		overlayUnclaimed: o.OverlayUnclaimed,
 		send:     o.Send,
 		input:    ti,
 		onRedraw: onRedraw,
@@ -571,6 +581,9 @@ func (m *Model) statusBar() string {
 	}
 	if m.clients != nil {
 		parts = append(parts, fmt.Sprintf("%d overlay", m.clients()))
+	}
+	if m.overlayUnclaimed != nil && m.overlayUnclaimed() {
+		parts = append(parts, "overlay pin matches no tab")
 	}
 	if m.mod == nil && m.send == nil {
 		parts = append(parts, "not logged in")

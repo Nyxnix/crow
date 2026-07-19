@@ -120,13 +120,13 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 		go watchConfig(ctx, ov)
 	}
 
-	// Normalize the pinned overlay channel the same way tab specs are, so a
-	// pin like "caedrel+yt:@LofiGirl" matches the tab that claims it (YouTube
-	// parts are case-sensitive; a plain ToLower would never match).
-	confSpec, _ := chat.ParseSpec(cfg.OverlayChannel)
+	// The pin is matched by source, not exact spec, so pinning a stable channel
+	// (a Twitch name) still selects a combined tab that adds other sources —
+	// which survives an unlisted YouTube video ID changing between streams.
+	_, pinSources := chat.ParseSpec(cfg.OverlayChannel)
 	ovState := &overlayState{
-		configured: confSpec,
-		enabled:    cfg.OverlayEnabled || headless,
+		pin:     pinSources,
+		enabled: cfg.OverlayEnabled || headless,
 	}
 
 	if headless {
@@ -154,17 +154,17 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 	}
 
 	app = tui.NewApp(tui.AppOptions{
-		Factory:     factory,
-		Login:       login,
-		Config:      cfg,
+		Factory: factory,
+		Login:   login,
+		Config:  cfg,
 		Save: func(c config.Config) {
 			config.Save(c)
 			ov.SetOptions(c.Overlay) // restyle connected browser sources live
 		},
-		Channels:    initial,
-		RequestCode: requestDeviceCode,
-		PollLogin:   pollLogin,
-		Logout:      func() { auth.Clear() },
+		Channels:        initial,
+		RequestCode:     requestDeviceCode,
+		PollLogin:       pollLogin,
+		Logout:          func() { auth.Clear() },
 		YTVerify:        ytVerifyCookies,
 		YTCookiesAuthed: func() bool { return config.Load().YouTubeCookies != "" },
 		YTCookiesLogout: ytClearCookies,
@@ -206,31 +206,59 @@ func watchConfig(ctx context.Context, ov *overlay.Server) {
 	}
 }
 
-// overlayState tracks which channel currently feeds the overlay. Only one does,
-// so deleted/banned content is scoped and tab switching never disrupts it.
+// overlayState tracks which tab currently feeds the overlay. Only one does, so
+// deleted/banned content is scoped and tab switching never disrupts it.
 type overlayState struct {
-	mu         sync.Mutex
-	enabled    bool   // overlay off in config: no channel ever publishes
-	configured string // channel the config pins the overlay to; "" = first opened
-	owner      string
+	mu      sync.Mutex
+	enabled bool          // overlay off in config: no tab ever publishes
+	pin     []chat.Source // sources the config pins to; empty = first opened tab
+	owner   string        // spec of the tab that owns the overlay
 }
 
-// claim reports whether channel should publish to the overlay, taking ownership
-// if it is free and this channel is the configured one (or none is configured).
-func (o *overlayState) claim(channel string) bool {
+// claim reports whether the tab with this spec (carrying these sources) should
+// publish to the overlay, taking ownership if it is free. A tab qualifies when
+// the pin is empty (first opened tab wins) or every pinned source is present in
+// the tab — so a pin can name a subset (e.g. just the Twitch channel) and still
+// select a combined tab.
+func (o *overlayState) claim(spec string, sources []chat.Source) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if !o.enabled {
 		return false
 	}
-	if o.owner == channel {
+	if o.owner == spec {
 		return true
 	}
-	if o.owner == "" && (o.configured == "" || o.configured == channel) {
-		o.owner = channel
+	if o.owner == "" && sourcesContain(sources, o.pin) {
+		o.owner = spec
 		return true
 	}
 	return false
+}
+
+// sourcesContain reports whether every source in want appears in have.
+func sourcesContain(have, want []chat.Source) bool {
+	for _, w := range want {
+		found := false
+		for _, h := range have {
+			if h == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// unclaimed reports whether the overlay is enabled and pinned but no open tab
+// matched the pin — the overlay is blank and the user should know why.
+func (o *overlayState) unclaimed() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.enabled && len(o.pin) > 0 && o.owner == ""
 }
 
 func (o *overlayState) release(channel string) {
@@ -314,7 +342,7 @@ func openChannel(parent context.Context, spec string, ov *overlay.Server, ovStat
 	// channels opened afterwards.
 	session := loadSession(ctx)
 	spec, sources := chat.ParseSpec(spec)
-	toOverlay := ovState.claim(spec)
+	toOverlay := ovState.claim(spec, sources)
 
 	feeds := make([]sourceFeed, len(sources))
 	for i, s := range sources {
@@ -385,15 +413,16 @@ func openChannel(parent context.Context, spec string, ov *overlay.Server, ovStat
 	}
 
 	model := tui.NewModel(tui.Options{
-		Channel:   spec,
-		Emotes:    emotes,
-		Mod:       mod,
-		Info:      info,
-		Clients:   clientsFn,
-		Stats:     statsFn,
-		Send:      sendFn,
-		SendLimit: sendLimit,
-		OnRedraw:  redraw,
+		Channel:          spec,
+		Emotes:           emotes,
+		Mod:              mod,
+		Info:             info,
+		Clients:          clientsFn,
+		OverlayUnclaimed: ovState.unclaimed,
+		Stats:            statsFn,
+		Send:             sendFn,
+		SendLimit:        sendLimit,
+		OnRedraw:         redraw,
 	})
 
 	// Ingest every source into the one model: apply registries, publish to the
@@ -476,7 +505,7 @@ func (p ytCookieInfo) CardInfo(ctx context.Context, userLogin, _ string) (tui.Us
 // runHeadless serves the overlay for one tab spec with no terminal UI.
 func runHeadless(ctx context.Context, spec, addr string, ov *overlay.Server, ovState *overlayState) error {
 	spec, sources := chat.ParseSpec(spec)
-	ovState.claim(spec)
+	ovState.claim(spec, sources)
 	session := loadSession(ctx)
 	for _, src := range sources {
 		f := startSource(ctx, src, session)
