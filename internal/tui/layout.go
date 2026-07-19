@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
 	"github.com/Nyxnix/crow/internal/chat"
@@ -130,6 +131,13 @@ func layout(msgs []chat.Message, width int, style *styles, gfx *kitty.Cache, sca
 
 	var out []line
 	for i, m := range msgs {
+		// Stream alerts and messages mentioning the logged-in user render as
+		// full-width red banner rows instead of the normal prefix+body shape.
+		if m.Alert != "" || (!m.Deleted && style.isMention(m.Text)) {
+			out = append(out, bannerLines(m, width, style, gfx, scale, i)...)
+			continue
+		}
+
 		name := m.Author
 
 		// A "HH:MM " timestamp leads every message, so it shifts everything after
@@ -184,7 +192,7 @@ func layout(msgs []chat.Message, width int, style *styles, gfx *kitty.Cache, sca
 		var spans [][]emoteSpan
 		restW := width - continuationIndent*scale
 		if gfx != nil && !m.Deleted {
-			bodyLines, spans = layoutBodyEmotes(m, firstW, restW, style, gfx, scale)
+			bodyLines, spans = layoutBodyEmotes(m, firstW, restW, textStyle, gfx, scale)
 		} else {
 			for _, c := range wrap(m.Text, firstW/scale, restW/scale) {
 				bodyLines = append(bodyLines, textStyle.Render(c))
@@ -265,6 +273,138 @@ func layout(msgs []chat.Message, width int, style *styles, gfx *kitty.Cache, sca
 	return out
 }
 
+// bannerLines renders a message as a full-width red banner: a stream alert
+// ("★ Nyx subscribed at Tier 1." plus any attached message) or a mention of
+// the logged-in user, which keeps its normal prefix — badges, colored
+// clickable name — on the red band. Text renders at chat scale like any
+// other line, but the scaled run stays text-length — a fully-scaled padded
+// row is the one shape kitty's multicell-glyph erase rules mangle on
+// rewrites (glyphs vanish, background stays) — and the band is completed to
+// the terminal edge with plain red spaces: beside the text on each row, and
+// as red filler rows under it, where space-writes skip the scaled glyph
+// bottoms and paint only the cells around them. Body text is plain words
+// (no inline emote images).
+func bannerLines(m chat.Message, width int, style *styles, gfx *kitty.Cache, scale int, msgIdx int) []line {
+	ts := timestamp(m)
+	cols := width / scale
+	tsW := runewidth.StringWidth(ts)
+
+	// One banner row: the scaled text run, then plain red to the edge.
+	row := func(scaled string, usedCells int) string {
+		pad := width - usedCells
+		if pad < 0 {
+			pad = 0
+		}
+		return kitty.ScaleText(scaled, scale) + style.highlight.Render(strings.Repeat(" ", pad))
+	}
+	// A red filler row, with any badge-image bottom cells placed over it. Red
+	// runs are interleaved around the cells rather than painted full-width
+	// first: bubbletea truncates lines whose visible width exceeds the
+	// terminal's, and a doubled-back row measures over and loses its tail —
+	// which is exactly the image cells.
+	fillerRow := func(fills []fill, dy int) string {
+		var b strings.Builder
+		col := 0
+		for _, f := range fills {
+			if dy >= len(f.rows) {
+				continue
+			}
+			if f.x0 > col {
+				b.WriteString(style.highlight.Render(strings.Repeat(" ", f.x0-col)))
+			}
+			fmt.Fprintf(&b, "\x1b[%dG", f.x0+1) // CHA is 1-based
+			b.WriteString(f.rows[dy])
+			col = f.x1
+		}
+		if col < width {
+			b.WriteString(style.highlight.Render(strings.Repeat(" ", width-col)))
+		}
+		return b.String()
+	}
+	plainFillers := func() []string {
+		var fs []string
+		for dy := 1; dy < scale; dy++ {
+			fs = append(fs, fillerRow(nil, dy-1))
+		}
+		return fs
+	}
+
+	var out []line
+	addBody := func(body string) {
+		for _, c := range wrap(body, cols-continuationIndent, cols-continuationIndent) {
+			s := style.highlight.Render(strings.Repeat(" ", continuationIndent) + c)
+			out = append(out, line{
+				text:    row(s, (continuationIndent+runewidth.StringWidth(c))*scale),
+				fillers: plainFillers(),
+			})
+		}
+	}
+
+	if m.Alert != "" {
+		for i, c := range wrap("★ "+m.AlertText, cols-tsW, cols-continuationIndent) {
+			prefix, cells := style.highlight.Render(strings.Repeat(" ", continuationIndent)), continuationIndent
+			if i == 0 {
+				prefix, cells = style.dim.Render(ts), tsW
+			}
+			s := prefix + style.highlight.Render(c)
+			out = append(out, line{
+				text:    row(s, (cells+runewidth.StringWidth(c))*scale),
+				fillers: plainFillers(),
+			})
+		}
+		if m.Text != "" { // wrap("") yields one empty line; an alert may have no body
+			addBody(m.Text)
+		}
+		return out
+	}
+
+	// A mention: the normal prefix shape (badges, colored name, hit box) on
+	// the band, body as plain highlighted words.
+	bg := style.highlight.GetBackground()
+	badgeStr, badgeW, badgeFills := renderBadges(m, style, gfx, scale)
+	for f := range badgeFills {
+		badgeFills[f].x0 += tsW * scale
+		badgeFills[f].x1 += tsW * scale
+	}
+	nameStart := tsW*scale + badgeW
+	name := m.Author
+	prefixCells := nameStart + (runewidth.StringWidth(name)+2)*scale
+
+	firstW := (width - prefixCells) / scale
+	chunks := wrap(m.Text, firstW, cols-continuationIndent)
+	if firstW < 8 {
+		// The prefix nearly fills the line; body goes entirely on continuation
+		// rows rather than overflowing the first (the autowrap desync hazard).
+		chunks = append([]string{""}, wrap(m.Text, cols-continuationIndent, cols-continuationIndent)...)
+	}
+
+	var fillers []string
+	for dy := 1; dy < scale; dy++ {
+		fillers = append(fillers, fillerRow(badgeFills, dy-1))
+	}
+	first := style.dim.Render(ts) + badgeStr +
+		style.name(m).Background(bg).Render(name) +
+		style.punct.Background(bg).Render(": ") +
+		style.highlight.Render(chunks[0])
+	out = append(out, line{
+		text:    row(first, prefixCells+runewidth.StringWidth(chunks[0])*scale),
+		fillers: fillers,
+		hit: &hit{
+			x0:  nameStart,
+			x1:  nameStart + runewidth.StringWidth(name)*scale,
+			msg: msgIdx,
+		},
+	})
+	for _, c := range chunks[1:] {
+		s := style.highlight.Render(strings.Repeat(" ", continuationIndent) + c)
+		out = append(out, line{
+			text:    row(s, (continuationIndent+runewidth.StringWidth(c))*scale),
+			fillers: plainFillers(),
+		})
+	}
+	return out
+}
+
 // fill is a multi-row image placement's below-first-row placeholder cells,
 // positioned at absolute columns within the line.
 type fill struct {
@@ -330,8 +470,9 @@ type renderedToken struct {
 
 // layoutBodyEmotes renders a message body into styled lines with emotes shown
 // as inline images. An emote whose image has not loaded (or failed) falls back
-// to its name, so the line is never empty where an emote should be.
-func layoutBodyEmotes(m chat.Message, firstW, restW int, style *styles, gfx *kitty.Cache, scale int) ([]string, [][]emoteSpan) {
+// to its name, so the line is never empty where an emote should be. textStyle
+// styles the plain-word tokens (normal, or highlight for a mention).
+func layoutBodyEmotes(m chat.Message, firstW, restW int, textStyle lipgloss.Style, gfx *kitty.Cache, scale int) ([]string, [][]emoteSpan) {
 	if restW < scale {
 		restW = scale
 	}
@@ -385,7 +526,7 @@ func layoutBodyEmotes(m chat.Message, firstW, restW int, style *styles, gfx *kit
 				continue
 			}
 		}
-		rendered = append(rendered, renderedToken{str: style.text.Render(t.text), w: runewidth.StringWidth(t.text) * scale, emote: t.emote})
+		rendered = append(rendered, renderedToken{str: textStyle.Render(t.text), w: runewidth.StringWidth(t.text) * scale, emote: t.emote})
 	}
 
 	return packTokens(rendered, firstW, restW, scale)

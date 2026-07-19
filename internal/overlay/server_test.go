@@ -180,3 +180,114 @@ func TestSettingsSentOnConnectAndChange(t *testing.T) {
 		t.Fatalf("after change got %q, want size 28", ev)
 	}
 }
+
+// An alert publishes as its own SSE event with the alert wire fields; a
+// non-alert message publishes no alert frame at all.
+func TestAlertReachesSubscriber(t *testing.T) {
+	s := New()
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	br := bufio.NewReader(resp.Body)
+	if _, err := br.ReadString('\n'); err != nil {
+		t.Fatalf("no greeting: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for s.Clients() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	s.PublishAlert(chat.Message{Author: "nyx", Text: "plain chat"}) // not an alert: dropped
+	s.PublishAlert(chat.Message{
+		Author: "nyx", Color: "#1E90FF", Text: "great stream",
+		Alert: chat.AlertResub, AlertText: "nyx subscribed for 6 months!",
+	})
+
+	// The first frame to arrive must be the real alert, proving the non-alert
+	// was dropped rather than sent.
+	line := readData(t, br)
+	var got wireAlert
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("bad JSON %q: %v", line, err)
+	}
+	if got.Kind != "resub" || got.AlertText != "nyx subscribed for 6 months!" ||
+		got.Author != "nyx" || got.Text != "great stream" {
+		t.Errorf("alert = %+v", got)
+	}
+}
+
+// The alerts page serves and wires up its own event listeners.
+func TestAlertsPageServes(t *testing.T) {
+	s := New()
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/alerts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"EventSource", "/events", `"alert"`, "alert_settings"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("alerts page missing %q", want)
+		}
+	}
+}
+
+// Alert settings ride their own event name, arrive on connect after the chat
+// settings, and re-broadcast only on change.
+func TestAlertSettingsSentOnConnectAndChange(t *testing.T) {
+	s := New()
+	s.SetOptions(map[string]int{"size": 20})
+	s.SetAlertOptions(map[string]int{"duration": 6})
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	br := bufio.NewReader(resp.Body)
+
+	readEvent := func() string {
+		var ev strings.Builder
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				t.Fatalf("stream ended: %v", err)
+			}
+			if line == "\n" && ev.Len() > 0 {
+				return ev.String()
+			}
+			if line != "\n" && !strings.HasPrefix(line, ":") {
+				ev.WriteString(line)
+			}
+		}
+	}
+
+	if ev := readEvent(); !strings.Contains(ev, "event: settings") {
+		t.Fatalf("first event = %q, want chat settings", ev)
+	}
+	if ev := readEvent(); !strings.Contains(ev, "event: alert_settings") || !strings.Contains(ev, `"duration":6`) {
+		t.Fatalf("second event = %q, want alert settings with duration 6", ev)
+	}
+
+	s.SetAlertOptions(map[string]int{"duration": 6}) // unchanged: no re-broadcast
+	s.SetAlertOptions(map[string]int{"duration": 9})
+	if ev := readEvent(); !strings.Contains(ev, "event: alert_settings") || !strings.Contains(ev, `"duration":9`) {
+		t.Fatalf("after change got %q, want duration 9", ev)
+	}
+}

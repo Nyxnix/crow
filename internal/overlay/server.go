@@ -18,7 +18,7 @@ import (
 	"github.com/Nyxnix/crow/internal/chat"
 )
 
-//go:embed overlay.html
+//go:embed overlay.html alerts.html
 var assets embed.FS
 
 // zeroTime clears a write deadline rather than setting one.
@@ -37,6 +37,9 @@ type Server struct {
 	// source on connect and re-broadcast when they change, so the page needs
 	// nothing in its URL and picks up edits live.
 	settings []byte
+	// alertSettings is the same for the alerts page, as its own SSE event name
+	// so the two pages' settings can't collide on the shared /events stream.
+	alertSettings []byte
 }
 
 func New() *Server {
@@ -84,6 +87,51 @@ func (s *Server) SetOptions(v any) {
 	s.mu.Unlock()
 	if changed {
 		s.broadcast(frame("settings", b))
+	}
+}
+
+// SetAlertOptions publishes the alert page's options (config.AlertOptions,
+// kept as `any` like SetOptions). Unchanged options are not re-broadcast.
+func (s *Server) SetAlertOptions(v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	changed := !bytes.Equal(s.alertSettings, b)
+	s.alertSettings = b
+	s.mu.Unlock()
+	if changed {
+		s.broadcast(frame("alert_settings", b))
+	}
+}
+
+// wireAlert is the shape the alerts page consumes: a complete event sentence
+// plus the user's optional attached message. Emotes and badges are deliberately
+// omitted — an alert popup is text.
+type wireAlert struct {
+	Kind      string `json:"kind"`
+	Author    string `json:"author"`
+	Color     string `json:"color"`
+	AlertText string `json:"alert_text"`
+	Text      string `json:"text,omitempty"`
+}
+
+// PublishAlert sends an alert to every connected browser source; only the
+// alerts page listens for the event. Non-alert messages are ignored.
+func (s *Server) PublishAlert(m chat.Message) {
+	if m.Alert == "" {
+		return
+	}
+	w := wireAlert{
+		Kind:      string(m.Alert),
+		Author:    m.Author,
+		Color:     m.Color,
+		AlertText: m.AlertText,
+		Text:      m.Text,
+	}
+	if b, err := json.Marshal(w); err == nil {
+		s.broadcast(frame("alert", b))
 	}
 }
 
@@ -179,14 +227,18 @@ func (s *Server) Clients() int {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /events", s.handleEvents)
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		// The page is a browser source, not a cacheable asset; OBS should always
-		// get the current build after an upgrade.
-		w.Header().Set("Cache-Control", "no-store")
-		b, _ := assets.ReadFile("overlay.html")
-		w.Write(b)
-	})
+	page := func(name string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			// The page is a browser source, not a cacheable asset; OBS should
+			// always get the current build after an upgrade.
+			w.Header().Set("Cache-Control", "no-store")
+			b, _ := assets.ReadFile(name)
+			w.Write(b)
+		}
+	}
+	mux.HandleFunc("GET /{$}", page("overlay.html"))
+	mux.HandleFunc("GET /alerts", page("alerts.html"))
 	return mux
 }
 
@@ -209,11 +261,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// for the first message, which may be minutes away in a quiet chat.
 	fmt.Fprint(w, ": connected\n\n")
 	// Current settings first, so the page styles itself before any message.
+	// Both blobs go to every client; each page listens only to its own event.
 	s.mu.Lock()
-	settings := s.settings
+	settings, alertSettings := s.settings, s.alertSettings
 	s.mu.Unlock()
 	if settings != nil {
 		w.Write(frame("settings", settings))
+	}
+	if alertSettings != nil {
+		w.Write(frame("alert_settings", alertSettings))
 	}
 	rc.Flush()
 

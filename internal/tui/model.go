@@ -103,6 +103,10 @@ type Options struct {
 	// the status bar warns about. Leave nil to omit the check.
 	OverlayUnclaimed func() bool
 
+	// Login is the logged-in user's name, for highlighting messages that
+	// mention them. Empty disables the highlight.
+	Login string
+
 	// Stats returns the channel's live viewer count, uptime and session average
 	// for the status bar. Leave nil to omit them.
 	Stats func() StreamStats
@@ -138,25 +142,38 @@ func NewModel(o Options) *Model {
 	if onRedraw == nil {
 		onRedraw = func() {}
 	}
+	st := newStyles()
+	st.login = strings.ToLower(o.Login)
 	m := &Model{
-		channel:  o.Channel,
-		styles:   newStyles(),
-		emotes:   o.Emotes,
-		mod:      o.Mod,
-		info:     o.Info,
-		stats:    o.Stats,
-		clients:  o.Clients,
+		channel: o.Channel,
+		styles:  st,
+		emotes:  o.Emotes,
+		mod:     o.Mod,
+		info:    o.Info,
+		stats:   o.Stats,
+		clients: o.Clients,
 
 		overlayUnclaimed: o.OverlayUnclaimed,
-		send:     o.Send,
-		input:    ti,
-		onRedraw: onRedraw,
+		send:             o.Send,
+		input:            ti,
+		onRedraw:         onRedraw,
 	}
 	if kitty.Supported() {
-		m.gfx = kitty.New(onRedraw)
+		// One cache for the whole process, not per tab: every tab shares the
+		// terminal's single image-id space, so per-model caches would assign
+		// the same ids to different images and the last upload would hijack
+		// the other tabs' placeholders. onRedraw is the App's redraw for every
+		// model, so the first one works for all.
+		gfxOnce.Do(func() { sharedGfx = kitty.New(onRedraw) })
+		m.gfx = sharedGfx
 	}
 	return m
 }
+
+var (
+	sharedGfx *kitty.Cache
+	gfxOnce   sync.Once
+)
 
 // Append adds a received message. It is safe to call from a reader goroutine
 // while the UI goroutine renders, and asks the host to redraw.

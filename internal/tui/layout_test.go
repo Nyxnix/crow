@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
+	"github.com/muesli/termenv"
 
 	"github.com/Nyxnix/crow/internal/chat"
 	"github.com/Nyxnix/crow/internal/kitty"
@@ -271,7 +273,7 @@ func TestLayoutBodyEmotesFallsBackToName(t *testing.T) {
 		Text:   "gg Kappa",
 		Emotes: []chat.Emote{{Name: "Kappa", URL: "https://cdn/never-loads", Start: 3, End: 8}},
 	}
-	lines, _ := layoutBodyEmotes(m, 40, 40, newStyles(), gfx, 1)
+	lines, _ := layoutBodyEmotes(m, 40, 40, newStyles().text, gfx, 1)
 	joined := strings.Join(lines, " ")
 	if !strings.Contains(joined, "Kappa") {
 		t.Errorf("unloaded emote not shown as its name: %q", lines)
@@ -341,5 +343,99 @@ func TestLayoutScaled(t *testing.T) {
 	h := lines[0].hit
 	if h == nil || h.x0 != 12 || h.x1 != 12+len("nyx")*2 {
 		t.Errorf("hit box not scaled: %+v", h)
+	}
+}
+
+// An alert renders as a ★ event line with no hit box; its attached message
+// wraps beneath as an indented continuation line.
+func TestLayoutAlertLine(t *testing.T) {
+	lines := layout([]chat.Message{{
+		Author: "Nyx", AuthorLogin: "nyx",
+		Alert: chat.AlertSub, AlertText: "Nyx subscribed at Tier 1.",
+		Text: "hello chat",
+	}}, 80, newStyles(), nil, 1)
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2 (event + attached message)", len(lines))
+	}
+	if !strings.Contains(lines[0].text, "★ Nyx subscribed at Tier 1.") {
+		t.Errorf("alert line = %q, want the ★ event sentence", lines[0].text)
+	}
+	if lines[0].hit != nil {
+		t.Error("an alert line must not have a name hit box")
+	}
+	if !strings.Contains(lines[1].text, "hello chat") {
+		t.Errorf("continuation = %q, want the attached message", lines[1].text)
+	}
+
+	// No attached message: just the event line.
+	lines = layout([]chat.Message{{Alert: chat.AlertFollow, AlertText: "Nyx followed!"}},
+		80, newStyles(), nil, 1)
+	if len(lines) != 1 || !strings.Contains(lines[0].text, "Nyx followed!") {
+		t.Errorf("follow alert rendered %d lines, want one event line", len(lines))
+	}
+}
+
+// Mention detection: @login or the bare login on word boundaries, any case.
+func TestIsMention(t *testing.T) {
+	s := newStyles()
+	s.login = "nyx"
+	for text, want := range map[string]bool{
+		"@nyx hi":        true,
+		"hey NYX":        true,
+		"nyx: welcome":   true,
+		"gg @Nyx!":       true,
+		"nyxlike prices": false, // login as a prefix of a longer word
+		"onyx armor":     false, // login inside a word
+		"no mention":     false,
+		"":               false,
+	} {
+		if got := s.isMention(text); got != want {
+			t.Errorf("isMention(%q) = %v, want %v", text, got, want)
+		}
+	}
+
+	// Not logged in: never a mention.
+	if (&styles{}).isMention("@nyx") {
+		t.Error("empty login matched a mention")
+	}
+}
+
+// The mention highlight must survive the whole layout pipeline as an actual
+// background SGR, at plain and kitty-scaled sizes — not just isMention logic.
+func TestLayoutMentionEmitsBackground(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(old)
+
+	s := newStyles()
+	s.login = "nyxnx_"
+	msgs := []chat.Message{{Author: "someone", Text: "@Nyxnx_ hi"}}
+
+	for _, scale := range []int{1, 2} {
+		lines := layout(msgs, 80, s, nil, scale)
+		var joined strings.Builder
+		for _, l := range lines {
+			joined.WriteString(l.text)
+		}
+		if !strings.Contains(joined.String(), "48;5;52") {
+			t.Errorf("scale %d: mention line missing the red background", scale)
+		}
+		// The banner keeps the author name and its click hit box.
+		if !strings.Contains(joined.String(), "someone") {
+			t.Errorf("scale %d: mention banner lost the author name", scale)
+		}
+		if lines[0].hit == nil || lines[0].hit.msg != 0 {
+			t.Errorf("scale %d: mention banner lost the name hit box", scale)
+		}
+	}
+
+	// Anonymous session: the same message renders without the highlight.
+	s.login = ""
+	var joined strings.Builder
+	for _, l := range layout(msgs, 80, s, nil, 1) {
+		joined.WriteString(l.text)
+	}
+	if strings.Contains(joined.String(), "48;5;52") {
+		t.Error("anonymous session highlighted a mention")
 	}
 }

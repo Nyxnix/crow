@@ -138,9 +138,11 @@ func TestFlushUploadsReEmitsThenSettles(t *testing.T) {
 	}
 }
 
-// An animated (multi-frame) upload is emitted exactly once and never re-emitted:
-// re-sending its frames would corrupt the animation.
-func TestAnimatedUploadEmittedOnce(t *testing.T) {
+// An animated (multi-frame) upload re-emits during the settle window like a
+// static one — a discarded bubbletea frame must not lose the animation — and
+// every emission deletes the id first, so the re-sent frames replace rather
+// than corrupt, and a stale image from a previous run can't linger under it.
+func TestAnimatedUploadReEmitsWithDelete(t *testing.T) {
 	c := New(nil)
 	c.mu.Lock()
 	c.byURL["anim"] = &entry{
@@ -153,11 +155,25 @@ func TestAnimatedUploadEmittedOnce(t *testing.T) {
 	}
 	c.mu.Unlock()
 
-	if first := c.FlushUploads(); !strings.Contains(first, "\x1b_Ga=T") {
+	first := c.FlushUploads()
+	if !strings.Contains(first, "\x1b_Ga=T") {
 		t.Error("first flush should carry the animated upload")
 	}
-	if second := c.FlushUploads(); second != "" {
-		t.Errorf("animated upload re-emitted (%q); it must settle after one flush", second)
+	if !strings.Contains(first, "\x1b_Ga=d,d=I,i=1") {
+		t.Error("upload not preceded by its id's delete")
+	}
+	if idx := strings.Index(first, "a=d,d=I"); idx > strings.Index(first, "a=T") {
+		t.Error("delete must come before the upload")
+	}
+	if second := c.FlushUploads(); !strings.Contains(second, "\x1b_Ga=T") {
+		t.Error("animated upload should re-emit within the settle window")
+	}
+
+	// Past the window it settles like a static image.
+	time.Sleep(uploadWindow + 20*time.Millisecond)
+	c.FlushUploads() // final emission
+	if done := c.FlushUploads(); done != "" {
+		t.Errorf("after settling, flush = %q, want empty", done)
 	}
 }
 

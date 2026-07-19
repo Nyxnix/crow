@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Nyxnix/crow/internal/chat"
@@ -24,8 +26,13 @@ type styles struct {
 	badgeVIP         lipgloss.Style
 	badgeSub         lipgloss.Style
 
-	danger  lipgloss.Style
-	deleted lipgloss.Style
+	danger    lipgloss.Style
+	deleted   lipgloss.Style
+	highlight lipgloss.Style // red background: alert lines and mentions of the user
+
+	// login is the logged-in user's lowercase name, for mention detection.
+	// Empty when not logged in, which disables the mention highlight.
+	login string
 
 	tabBar      lipgloss.Style
 	tabActive   lipgloss.Style
@@ -55,8 +62,9 @@ func newStyles() *styles {
 		badgeVIP:         lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Bold(true),
 		badgeSub:         lipgloss.NewStyle().Foreground(lipgloss.Color("111")),
 
-		danger:  lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true),
-		deleted: lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Strikethrough(true),
+		danger:    lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true),
+		deleted:   lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Strikethrough(true),
+		highlight: lipgloss.NewStyle().Background(lipgloss.Color("52")).Foreground(lipgloss.Color("231")),
 
 		tabBar:      lipgloss.NewStyle().Background(lipgloss.Color("236")),
 		tabActive:   lipgloss.NewStyle().Background(lipgloss.Color("99")).Foreground(lipgloss.Color("231")).Bold(true),
@@ -92,6 +100,36 @@ func fallbackColor(name string) string {
 		h = h*31 + uint32(r)
 	}
 	return fallbackPalette[int(h%uint32(len(fallbackPalette)))]
+}
+
+// isMention reports whether text mentions the logged-in user: "@login" or the
+// bare login, case-insensitive, on word boundaries (so "nyx" doesn't hit
+// inside "nyxlike"). ponytail: scanned per render over the visible backlog;
+// cache a flag on the message if a profiler ever cares.
+func (s *styles) isMention(text string) bool {
+	if s.login == "" {
+		return false
+	}
+	t := strings.ToLower(text)
+	for i := 0; ; {
+		j := strings.Index(t[i:], s.login)
+		if j < 0 {
+			return false
+		}
+		j += i
+		end := j + len(s.login)
+		// '@' is not a word byte, so a boundary check alone covers "@login".
+		if (j == 0 || !isWordByte(t[j-1])) && (end == len(t) || !isWordByte(t[end])) {
+			return true
+		}
+		i = end
+	}
+}
+
+// isWordByte matches the character set of Twitch logins ([a-z0-9_]); anything
+// else ends a word for mention purposes.
+func isWordByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '_'
 }
 
 // roleTag returns a short colored marker for an author's role, standing in for

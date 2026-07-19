@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Crow alerts</title>
+<style>
+  :root {
+    --shadow: rgba(0, 0, 0, 0.8);
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    /* A browser source composites over video: the page must not paint a
+       background of its own, and must never show scrollbars. */
+    background: transparent;
+    overflow: hidden;
+  }
+
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+    color: #fff;
+    /* Same four-offset outline as the chat overlay: legible over any video. */
+    text-shadow:
+      2px 0 var(--shadow), -2px 0 var(--shadow),
+      0 2px var(--shadow), 0 -2px var(--shadow),
+      2px 2px var(--shadow), -2px -2px var(--shadow),
+      2px -2px var(--shadow), -2px 2px var(--shadow);
+  }
+
+  #alert {
+    text-align: center;
+    max-width: 90%;
+    display: none;
+  }
+
+  #alert.show {
+    display: block;
+    animation: pop 0.35s ease-out;
+  }
+
+  #alert.leaving { animation: leave 0.3s ease-in forwards; }
+
+  @keyframes pop {
+    from { opacity: 0; transform: translateY(14px) scale(0.92); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  @keyframes leave {
+    to { opacity: 0; transform: translateY(-10px) scale(0.96); }
+  }
+
+  .headline {
+    font-size: 42px;
+    font-weight: 800;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+
+  .headline .author { color: var(--author-color, #fff); }
+
+  .body {
+    margin-top: 6px;
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #alert.show, #alert.leaving { animation: none; }
+    #alert.leaving { opacity: 0; }
+  }
+</style>
+</head>
+<body>
+<div id="alert">
+  <div class="headline"></div>
+  <div class="body"></div>
+</div>
+<script>
+(() => {
+  "use strict";
+
+  // Keys and defaults match config.AlertOptions' JSON; settings arrive from
+  // the server over SSE on connect and whenever they change.
+  const defaults = {
+    enabled: true, follows: true, subs: true, gift_subs: true, bits: true,
+    members: true, gift_members: true, superchats: true, duration: 6,
+  };
+
+  // Alert kind -> the settings toggle that controls it.
+  const KIND_KEY = {
+    follow: "follows", sub: "subs", resub: "subs", gift: "gift_subs",
+    bits: "bits", member: "members", gift_member: "gift_members",
+    superchat: "superchats",
+  };
+
+  let cfg = { ...defaults };
+
+  const box = document.getElementById("alert");
+  const headline = box.querySelector(".headline");
+  const body = box.querySelector(".body");
+
+  // One alert at a time; the rest wait their turn.
+  const queue = [];
+  let showing = false;
+
+  function pump() {
+    if (showing || queue.length === 0) return;
+    const a = queue.shift();
+    showing = true;
+
+    // AlertText is a complete sentence that starts with the author's name;
+    // color just the name portion when it prefixes the text. textContent
+    // only — chat is untrusted input.
+    headline.textContent = "";
+    if (a.author && a.alert_text.startsWith(a.author)) {
+      const name = document.createElement("span");
+      name.className = "author";
+      name.textContent = a.author;
+      if (a.color) name.style.setProperty("--author-color", a.color);
+      headline.append(name, a.alert_text.slice(a.author.length));
+    } else {
+      headline.textContent = a.alert_text;
+    }
+    body.textContent = a.text || "";
+    body.style.display = a.text ? "" : "none";
+
+    box.classList.remove("leaving");
+    box.classList.add("show");
+    setTimeout(() => {
+      box.classList.add("leaving");
+      setTimeout(() => {
+        box.classList.remove("show", "leaving");
+        showing = false;
+        pump();
+      }, 320);
+    }, Math.max(1, cfg.duration) * 1000);
+  }
+
+  const es = new EventSource("/events");
+  es.addEventListener("alert_settings", (ev) => {
+    try { cfg = { ...defaults, ...JSON.parse(ev.data) }; } catch {}
+  });
+  es.addEventListener("alert", (ev) => {
+    let a;
+    try { a = JSON.parse(ev.data); } catch { return; }
+    if (!cfg.enabled || !a.alert_text) return;
+    if (cfg[KIND_KEY[a.kind]] === false) return;
+    queue.push(a);
+    pump();
+  });
+})();
+</script>
+</body>
+</html>

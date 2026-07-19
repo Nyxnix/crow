@@ -46,6 +46,21 @@ type Badge struct {
 	URL     string
 }
 
+// AlertKind classifies a stream alert (a follow, a sub, a superchat, ...).
+// Empty on a normal chat message.
+type AlertKind string
+
+const (
+	AlertFollow     AlertKind = "follow"
+	AlertSub        AlertKind = "sub"
+	AlertResub      AlertKind = "resub"
+	AlertGift       AlertKind = "gift" // Twitch subgift / submysterygift
+	AlertBits       AlertKind = "bits"
+	AlertMember     AlertKind = "member"      // YouTube new member / milestone
+	AlertGiftMember AlertKind = "gift_member" // YouTube gifted memberships
+	AlertSuperchat  AlertKind = "superchat"
+)
+
 // Message is one chat line, normalized across platforms.
 type Message struct {
 	ID       string
@@ -76,6 +91,13 @@ type Message struct {
 	// ModParams is YouTube's opaque context-menu token for this message, the
 	// key to cookie-based moderation (remove/timeout/hide). Empty on Twitch.
 	ModParams string
+
+	// Alert marks this message as a stream alert. AlertText is then a complete
+	// standalone sentence including the name ("Nyx subscribed at Tier 1."),
+	// while Text keeps the user's optional attached message (a resub message,
+	// cheer text, superchat body) and may be empty.
+	Alert     AlertKind
+	AlertText string
 
 	At time.Time
 }

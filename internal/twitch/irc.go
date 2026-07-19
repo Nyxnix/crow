@@ -293,6 +293,17 @@ func (c *Client) session(ctx context.Context) error {
 			} else {
 				c.emitEvent(chat.ModEvent{Kind: chat.ClearAll})
 			}
+		case "USERNOTICE":
+			// Subs, resubs and gifts arrive here; other notice kinds are dropped.
+			msg, ok := toAlert(line)
+			if !ok {
+				continue
+			}
+			select {
+			case c.Out <- msg:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		case "PRIVMSG":
 			msg, ok := toMessage(line)
 			if !ok {
@@ -445,6 +456,60 @@ func toMessage(l ircLine) (chat.Message, bool) {
 		Text:        text,
 		Emotes:      parseEmotes(l.tags["emotes"], text),
 		Badges:      badges,
+		At:          tagTime(l.tags["tmi-sent-ts"]),
+	}
+	if bits := l.tags["bits"]; bits != "" {
+		m.Alert = chat.AlertBits
+		m.AlertText = author + " cheered " + bits + " bits"
+	}
+	applyBadgeRoles(&m)
+	return m, true
+}
+
+// toAlert converts a USERNOTICE line into an alert chat.Message. Only sub,
+// resub and gift notices become alerts; other kinds (raid, announcement,
+// rituals) report false. system-msg is Twitch's own complete sentence for the
+// event; the trailing param is the user's optional attached message.
+func toAlert(l ircLine) (chat.Message, bool) {
+	var kind chat.AlertKind
+	switch l.tags["msg-id"] {
+	case "sub":
+		kind = chat.AlertSub
+	case "resub":
+		kind = chat.AlertResub
+	case "subgift", "submysterygift":
+		kind = chat.AlertGift
+	default:
+		return chat.Message{}, false
+	}
+	if len(l.params) < 1 {
+		return chat.Message{}, false
+	}
+
+	// USERNOTICE comes from tmi.twitch.tv, not the user, so the login lives in
+	// a tag rather than the prefix.
+	login := l.tags["login"]
+	author := l.tags["display-name"]
+	if author == "" {
+		author = login
+	}
+	text := ""
+	if len(l.params) >= 2 {
+		text = l.params[1]
+	}
+	m := chat.Message{
+		ID:          l.tags["id"],
+		Platform:    chat.Twitch,
+		Channel:     strings.TrimPrefix(l.params[0], "#"),
+		AuthorID:    l.tags["user-id"],
+		Author:      author,
+		AuthorLogin: login,
+		Color:       l.tags["color"],
+		Text:        text,
+		Emotes:      parseEmotes(l.tags["emotes"], text),
+		Badges:      parseBadges(l.tags["badges"]),
+		Alert:       kind,
+		AlertText:   l.tags["system-msg"],
 		At:          tagTime(l.tags["tmi-sent-ts"]),
 	}
 	applyBadgeRoles(&m)

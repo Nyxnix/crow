@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -106,6 +107,7 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 	// it serves regardless of the toggle.
 	ov := overlay.New()
 	ov.SetOptions(cfg.Overlay)
+	ov.SetAlertOptions(cfg.Alerts)
 	if cfg.OverlayEnabled || headless {
 		ln, err := net.Listen("tcp", cfg.OverlayAddr)
 		if err != nil {
@@ -153,13 +155,47 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 		initial = []string{login} // logged in with nothing else: open your own chat
 	}
 
+	// Test alerts cycle through every kind with realistic sentences, so the
+	// OBS popup can be positioned and styled without waiting for real events.
+	// Only the kinds that really carry a user message (subs, resubs, bits,
+	// superchats, member milestones) get an attached one.
+	testAlerts := []struct {
+		kind chat.AlertKind
+		text string
+		msg  string
+	}{
+		{chat.AlertFollow, "TestUser followed!", ""},
+		{chat.AlertSub, "TestUser subscribed at Tier 1.", "an attached test message"},
+		{chat.AlertResub, "TestUser subscribed for 12 months!", "an attached test message"},
+		{chat.AlertGift, "TestUser is gifting 5 subs!", ""},
+		{chat.AlertBits, "TestUser cheered 500 bits", "an attached test message"},
+		{chat.AlertMember, "TestUser became a member", "an attached test message"},
+		{chat.AlertGiftMember, "TestUser gifted 5 memberships", ""},
+		{chat.AlertSuperchat, "TestUser sent $5.00", "an attached test message"},
+	}
+	var testAlertN int
+
 	app = tui.NewApp(tui.AppOptions{
-		Factory: factory,
-		Login:   login,
-		Config:  cfg,
+		Factory:            factory,
+		Login:              login,
+		FollowScopeMissing: session != nil && !slices.Contains(session.Scope, "moderator:read:followers"),
+		TestAlert: func() chat.Message {
+			ta := testAlerts[testAlertN%len(testAlerts)]
+			testAlertN++
+			m := chat.Message{
+				Platform: chat.Twitch, Channel: "test",
+				AuthorID: "0", Author: "TestUser", AuthorLogin: "testuser", Color: "#FF69B4",
+				Alert: ta.kind, AlertText: ta.text,
+				Text: ta.msg, At: time.Now(),
+			}
+			ov.PublishAlert(m)
+			return m
+		},
+		Config: cfg,
 		Save: func(c config.Config) {
 			config.Save(c)
 			ov.SetOptions(c.Overlay) // restyle connected browser sources live
+			ov.SetAlertOptions(c.Alerts)
 		},
 		Channels:        initial,
 		RequestCode:     requestDeviceCode,
@@ -201,7 +237,9 @@ func watchConfig(ctx context.Context, ov *overlay.Server) {
 				continue
 			}
 			last = st.ModTime()
-			ov.SetOptions(config.Load().Overlay)
+			c := config.Load()
+			ov.SetOptions(c.Overlay)
+			ov.SetAlertOptions(c.Alerts)
 		}
 	}
 }
@@ -358,11 +396,14 @@ func openChannel(parent context.Context, spec string, ov *overlay.Server, ovStat
 	var statsFn func() tui.StreamStats
 	var info tui.InfoProvider
 	var emotes *emote.Registry
+	var helix *twitch.Helix // kept concrete: the follow poller needs BroadcasterID
 	if single {
 		channel := sources[0].Channel
 		emotes = feeds[0].emotes
 		info = infoProvider{&ivr.Client{}}
-		mod = buildModerator(ctx, channel, session)
+		if helix = buildModerator(ctx, channel, session); helix != nil {
+			mod = helix // assign only when non-nil: a typed nil would fake a Moderator
+		}
 		if session != nil {
 			sender := &twitch.Client{Channel: channel, Nick: session.Login, Token: session.AccessToken, Out: make(chan chat.Message, 16)}
 			go sender.Run(ctx)
@@ -412,6 +453,10 @@ func openChannel(parent context.Context, spec string, ov *overlay.Server, ovStat
 		clientsFn = ov.Clients
 	}
 
+	login := ""
+	if session != nil {
+		login = session.Login
+	}
 	model := tui.NewModel(tui.Options{
 		Channel:          spec,
 		Emotes:           emotes,
@@ -423,7 +468,67 @@ func openChannel(parent context.Context, spec string, ov *overlay.Server, ovStat
 		Send:             sendFn,
 		SendLimit:        sendLimit,
 		OnRedraw:         redraw,
+		Login:            login,
 	})
+
+	// Follow alerts have no chat feed: a Helix poller synthesizes them straight
+	// into the model and alerts overlay. Only on a single Twitch tab, logged in
+	// with the follower scope, and with follow alerts switched on.
+	if cfg := config.Load(); helix != nil && cfg.Alerts.Enabled && cfg.Alerts.Follows &&
+		slices.Contains(session.Scope, "moderator:read:followers") {
+		channel := sources[0].Channel
+		fp := &twitch.FollowPoller{
+			ClientID:      clientID(),
+			Token:         session.AccessToken,
+			BroadcasterID: helix.BroadcasterID,
+			OnFollow: func(id, name string) {
+				m := chat.Message{
+					Platform:    chat.Twitch,
+					Channel:     channel,
+					AuthorID:    id,
+					Author:      name,
+					AuthorLogin: strings.ToLower(name),
+					Alert:       chat.AlertFollow,
+					AlertText:   name + " followed!",
+					At:          time.Now(),
+				}
+				if toOverlay {
+					ov.PublishAlert(m)
+				}
+				model.Append(m)
+			},
+		}
+		go fp.Run(ctx)
+	}
+
+	// Debug: inject one synthetic alert of each kind shortly after open, so the
+	// chat line, alerts page and settings toggles can be exercised offline.
+	if os.Getenv("CROW_FAKE_ALERTS") == "1" {
+		go func() {
+			time.Sleep(2 * time.Second)
+			kinds := []chat.AlertKind{
+				chat.AlertFollow, chat.AlertSub, chat.AlertResub, chat.AlertGift,
+				chat.AlertBits, chat.AlertMember, chat.AlertGiftMember, chat.AlertSuperchat,
+			}
+			for _, k := range kinds {
+				text := ""
+				switch k { // only these kinds carry a user message in reality
+				case chat.AlertSub, chat.AlertResub, chat.AlertBits, chat.AlertSuperchat, chat.AlertMember:
+					text = "an attached message"
+				}
+				m := chat.Message{
+					Platform: chat.Twitch, Channel: spec,
+					AuthorID: "0", Author: "FakeUser", AuthorLogin: "fakeuser", Color: "#FF69B4",
+					Alert: k, AlertText: "FakeUser fired a " + string(k) + " alert",
+					Text: text, At: time.Now(),
+				}
+				if toOverlay {
+					ov.PublishAlert(m)
+				}
+				model.Append(m)
+			}
+		}()
+	}
 
 	// Ingest every source into the one model: apply registries, publish to the
 	// overlay if this tab owns it, and append. Moderation likewise.
@@ -436,7 +541,12 @@ func openChannel(parent context.Context, spec string, ov *overlay.Server, ovStat
 					observe(m) // record YouTube moderation tokens
 				}
 				if toOverlay {
-					ov.Publish(m)
+					// An alert with no attached message is not a chat line; it goes
+					// only to the alerts page. PublishAlert ignores non-alerts.
+					if m.Alert == "" || m.Text != "" {
+						ov.Publish(m)
+					}
+					ov.PublishAlert(m)
 				}
 				model.Append(m)
 			}
@@ -517,7 +627,10 @@ func runHeadless(ctx context.Context, spec, addr string, ov *overlay.Server, ovS
 		go func() {
 			for m := range f.msgs {
 				f.apply(&m)
-				ov.Publish(m)
+				if m.Alert == "" || m.Text != "" {
+					ov.Publish(m)
+				}
+				ov.PublishAlert(m)
 			}
 		}()
 	}
@@ -665,7 +778,7 @@ func loadSession(ctx context.Context) *auth.StoredToken {
 // The channel's broadcaster ID is resolved synchronously here so the returned
 // Helix is fully constructed — no field is mutated later from another
 // goroutine, which is what a ROOMSTATE-driven callback would have required.
-func buildModerator(ctx context.Context, channel string, st *auth.StoredToken) tui.Moderator {
+func buildModerator(ctx context.Context, channel string, st *auth.StoredToken) *twitch.Helix {
 	if st == nil {
 		return nil
 	}

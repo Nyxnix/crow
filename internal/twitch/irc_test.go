@@ -1,6 +1,10 @@
 package twitch
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Nyxnix/crow/internal/chat"
+)
 
 // A realistic tagged PRIVMSG, the shape everything else depends on.
 const privmsg = `@badge-info=subscriber/14;badges=broadcaster/1,subscriber/12;color=#1E90FF;display-name=Nyx;emotes=25:6-10;id=abc-123;tmi-sent-ts=1700000000000;user-id=4242 :nyx!nyx@nyx.tmi.twitch.tv PRIVMSG #buh :hello Kappa world`
@@ -103,5 +107,87 @@ func TestParseLine(t *testing.T) {
 		if _, ok := parseLine(bad); ok {
 			t.Errorf("parseLine(%q) accepted, want rejected", bad)
 		}
+	}
+}
+
+// USERNOTICE sub/resub/gift lines become alert messages carrying Twitch's own
+// system-msg sentence; other notice kinds are dropped.
+func TestUserNoticeToAlert(t *testing.T) {
+	cases := []struct {
+		name, raw string
+		kind      chat.AlertKind
+		alertText string
+		text      string
+	}{
+		{
+			name:      "sub",
+			raw:       `@badges=;color=;display-name=Nyx;id=n1;login=nyx;msg-id=sub;system-msg=Nyx\ssubscribed\sat\sTier\s1.;tmi-sent-ts=1700000000000;user-id=1 :tmi.twitch.tv USERNOTICE #buh`,
+			kind:      chat.AlertSub,
+			alertText: "Nyx subscribed at Tier 1.",
+		},
+		{
+			name:      "resub with message",
+			raw:       `@badges=subscriber/6;display-name=Nyx;id=n2;login=nyx;msg-id=resub;msg-param-cumulative-months=6;system-msg=Nyx\ssubscribed\sfor\s6\smonths!;user-id=1 :tmi.twitch.tv USERNOTICE #buh :great stream`,
+			kind:      chat.AlertResub,
+			alertText: "Nyx subscribed for 6 months!",
+			text:      "great stream",
+		},
+		{
+			name:      "subgift",
+			raw:       `@display-name=Nyx;id=n3;login=nyx;msg-id=subgift;system-msg=Nyx\sgifted\sa\ssub!;user-id=1 :tmi.twitch.tv USERNOTICE #buh`,
+			kind:      chat.AlertGift,
+			alertText: "Nyx gifted a sub!",
+		},
+		{
+			name:      "submysterygift",
+			raw:       `@display-name=Nyx;id=n4;login=nyx;msg-id=submysterygift;system-msg=Nyx\sis\sgifting\s5\ssubs!;user-id=1 :tmi.twitch.tv USERNOTICE #buh`,
+			kind:      chat.AlertGift,
+			alertText: "Nyx is gifting 5 subs!",
+		},
+	}
+	for _, c := range cases {
+		line, ok := parseLine(c.raw)
+		if !ok {
+			t.Fatalf("%s: parseLine rejected the line", c.name)
+		}
+		m, ok := toAlert(line)
+		if !ok {
+			t.Fatalf("%s: toAlert rejected the notice", c.name)
+		}
+		if m.Alert != c.kind || m.AlertText != c.alertText || m.Text != c.text {
+			t.Errorf("%s: alert=%q alertText=%q text=%q, want %q/%q/%q",
+				c.name, m.Alert, m.AlertText, m.Text, c.kind, c.alertText, c.text)
+		}
+		if m.Author != "Nyx" || m.AuthorLogin != "nyx" || m.Channel != "buh" {
+			t.Errorf("%s: author=%q login=%q channel=%q", c.name, m.Author, m.AuthorLogin, m.Channel)
+		}
+	}
+
+	// Raids and other notices are not alerts.
+	line, _ := parseLine(`@msg-id=raid;system-msg=x :tmi.twitch.tv USERNOTICE #buh`)
+	if _, ok := toAlert(line); ok {
+		t.Error("a raid notice became an alert")
+	}
+}
+
+// A cheer is a PRIVMSG with a bits tag: still a chat message, plus a bits alert.
+func TestCheerSetsBitsAlert(t *testing.T) {
+	raw := `@bits=100;display-name=Nyx;id=c1;user-id=1 :nyx!nyx@nyx.tmi.twitch.tv PRIVMSG #buh :Cheer100 gg`
+	line, _ := parseLine(raw)
+	m, ok := toMessage(line)
+	if !ok {
+		t.Fatal("toMessage rejected a cheer")
+	}
+	if m.Alert != chat.AlertBits || m.AlertText != "Nyx cheered 100 bits" {
+		t.Errorf("alert=%q alertText=%q", m.Alert, m.AlertText)
+	}
+	if m.Text != "Cheer100 gg" {
+		t.Errorf("cheer text = %q, want the original message", m.Text)
+	}
+
+	// No bits tag: no alert.
+	line, _ = parseLine(privmsg)
+	if m, _ := toMessage(line); m.Alert != "" {
+		t.Errorf("plain PRIVMSG got alert %q", m.Alert)
 	}
 }

@@ -159,10 +159,10 @@ func isDiacritic(r rune) bool { return diacriticSet[r] }
 // frame; a static one has exactly one.
 type entry struct {
 	id          uint32
-	rows        int      // placement height in cells; 0 means inline (one row)
-	cols        int      // placement width in cells
-	frames      [][]byte // PNG bytes per frame
-	delays      []int    // per-frame display time in ms
+	rows        int       // placement height in cells; 0 means inline (one row)
+	cols        int       // placement width in cells
+	frames      [][]byte  // PNG bytes per frame
+	delays      []int     // per-frame display time in ms
 	ready       bool      // fetched and decoded
 	failed      bool      // fetch/decode failed; do not retry
 	readyAt     time.Time // when ready flipped true, for the re-emit window
@@ -332,13 +332,17 @@ func (c *Cache) FlushUploads() string {
 		if !e.ready || e.transmitted || e.deferred {
 			continue
 		}
+		// Delete the id before uploading. This is what makes re-emission safe
+		// for an animation — a bare re-send would wipe its composed frames and
+		// append duplicates — so animated uploads can ride the same settle
+		// window as static ones instead of being lost with a discarded frame.
+		// It also evicts any stale image a previous crow run left under this
+		// id, which otherwise shows as the wrong emote. ponytail: a heavy
+		// animation re-uploads once per flushed frame for 200ms; shrink the
+		// window per-entry if that ever visibly stutters.
+		fmt.Fprintf(&b, "\x1b_Ga=d,d=I,i=%d,q=2\x1b\\", e.id)
 		writeUpload(&b, e)
-		// An animated upload must be emitted exactly once: re-sending its a=T root
-		// wipes the composed frames and re-sending a=f frames appends duplicates,
-		// so re-emitting corrupts the animation. Only a single-frame (static) image
-		// is safe to re-emit across the settle window that protects it from a
-		// discarded frame during a message burst.
-		if len(e.frames) > 1 || time.Since(e.readyAt) > uploadWindow {
+		if time.Since(e.readyAt) > uploadWindow {
 			e.transmitted = true
 		}
 	}

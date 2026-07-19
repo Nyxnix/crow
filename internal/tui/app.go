@@ -56,6 +56,16 @@ type App struct {
 	cfg   config.Config
 	save  func(config.Config)
 
+	// followScopeMissing: logged in with a token that predates the
+	// moderator:read:followers scope, so follow alerts can't poll. The alerts
+	// settings page shows a re-login hint.
+	followScopeMissing bool
+
+	// testAlert publishes a synthetic alert to the alerts overlay and returns
+	// it, so the settings page can fire test popups for OBS positioning. The
+	// returned message is also appended to the active tab's chat.
+	testAlert func() chat.Message
+
 	// Inline login (device flow), provided by the host. requestCode starts it
 	// and returns a code to show plus an opaque handle; pollLogin blocks until
 	// the user approves and returns their login. Nil disables inline login.
@@ -98,6 +108,14 @@ type AppOptions struct {
 	PollLogin   func(handle any) (login string, err error)
 	Logout      func()
 
+	// FollowScopeMissing: the stored token lacks moderator:read:followers, so
+	// the alerts settings page hints that follows need a re-login.
+	FollowScopeMissing bool
+
+	// TestAlert publishes one synthetic alert to the alerts overlay and
+	// returns it; each call cycles to the next alert kind. Nil hides the row.
+	TestAlert func() chat.Message
+
 	YTVerify        func(cookies string) (name string, err error)
 	YTCookiesAuthed func() bool
 	YTCookiesLogout func()
@@ -117,14 +135,17 @@ func NewApp(o AppOptions) *App {
 		requestCode: o.RequestCode,
 		pollLogin:   o.PollLogin,
 		logout:      o.Logout,
-		ytVerify:        o.YTVerify,
-		ytCookiesAuthed: o.YTCookiesAuthed,
-		ytCookiesLogout: o.YTCookiesLogout,
-		ytOAuthStart:    o.YTOAuthStart,
-		ytOAuthPoll:     o.YTOAuthPoll,
-		ytOAuthAuthed:   o.YTOAuthAuthed,
-		ytOAuthLogout:   o.YTOAuthLogout,
-		redraw:          make(chan struct{}, 1),
+
+		followScopeMissing: o.FollowScopeMissing,
+		testAlert:          o.TestAlert,
+		ytVerify:           o.YTVerify,
+		ytCookiesAuthed:    o.YTCookiesAuthed,
+		ytCookiesLogout:    o.YTCookiesLogout,
+		ytOAuthStart:       o.YTOAuthStart,
+		ytOAuthPoll:        o.YTOAuthPoll,
+		ytOAuthAuthed:      o.YTOAuthAuthed,
+		ytOAuthLogout:      o.YTOAuthLogout,
+		redraw:             make(chan struct{}, 1),
 	}
 	a.splash = newSplashState(o.Login != "")
 	if len(o.Channels) == 0 {

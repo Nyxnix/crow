@@ -79,7 +79,7 @@ func physicalWidth(t *testing.T, row string) int {
 				if end < 0 {
 					t.Fatalf("unterminated OSC 66 in %q", row)
 				}
-				payload := rest[len("\x1b]66;") : end]
+				payload := rest[len("\x1b]66;"):end]
 				meta, text, _ := strings.Cut(payload, ";")
 				// Layout may downgrade the scale on narrow widths; trust the
 				// emitted s= over the requested scale.

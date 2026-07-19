@@ -19,6 +19,7 @@ const (
 	pageMain = iota
 	pageOverlay
 	pageAppearance
+	pageAlerts
 	pageYouTube
 	pageCount
 )
@@ -74,6 +75,9 @@ type settingsState struct {
 	ytStatus        string
 	ytErr           bool
 	ytHandle        any // opaque OAuth device-code handle between start and poll
+
+	// alertStatus confirms the last test alert fired from the alerts page.
+	alertStatus string
 }
 
 func newInput(val string, limit int) *textinput.Model {
@@ -118,6 +122,7 @@ func newSettingsState(login string, cfg *config.Config) settingsState {
 
 	main := []*srow{
 		{label: "overlay settings", open: pageOverlay},
+		{label: "alert settings", open: pageAlerts},
 		{label: "appearance", open: pageAppearance},
 		{label: "youtube login", open: pageYouTube},
 	}
@@ -163,6 +168,24 @@ func newSettingsState(login string, cfg *config.Config) settingsState {
 		{label: "overlay url", display: cfg.OverlayURL},
 	}
 
+	// The alerts page owns the separate alerts browser source: which events
+	// pop up and for how long. Toggles apply live to connected sources.
+	al := &cfg.Alerts
+	duration := newInput(strconv.Itoa(al.Duration), 4)
+	alerts := []*srow{
+		{label: "alerts", boolp: &al.Enabled},
+		{label: "follows", boolp: &al.Follows},
+		{label: "subs & resubs", boolp: &al.Subs},
+		{label: "gift subs", boolp: &al.GiftSubs},
+		{label: "bits", boolp: &al.Bits},
+		{label: "members (yt)", boolp: &al.Members},
+		{label: "gift members (yt)", boolp: &al.GiftMembers},
+		{label: "superchats (yt)", boolp: &al.Superchats},
+		{label: "duration (s)", ti: duration, commit: atoiKeep(&al.Duration)},
+		{label: "send test alert"},
+		{label: "alerts url", display: cfg.AlertsURL},
+	}
+
 	// The appearance page is crow's own look. Terminal text comes in whole-cell
 	// multiples (kitty's text sizing protocol), not arbitrary pixels.
 	var appearance []*srow
@@ -177,6 +200,7 @@ func newSettingsState(login string, cfg *config.Config) settingsState {
 	st.rows[pageMain] = main
 	st.rows[pageOverlay] = overlay
 	st.rows[pageAppearance] = appearance
+	st.rows[pageAlerts] = alerts
 	st.rows[pageYouTube] = yt
 	st.refocus()
 	return st
@@ -201,7 +225,7 @@ func (a *App) settingsKeyInner(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		switch st.page {
-		case pageAppearance, pageOverlay, pageYouTube:
+		case pageAppearance, pageOverlay, pageAlerts, pageYouTube:
 			st.page = pageMain
 		default:
 			if len(a.tabs) > 0 {
@@ -242,6 +266,14 @@ func (a *App) settingsKeyInner(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			*cur.boolp = !*cur.boolp
 		case cur.enump != nil:
 			*cur.enump = (*cur.enump + 1) % len(cur.enumOpts)
+		case cur.label == "send test alert" && st.page == pageAlerts:
+			if a.testAlert != nil {
+				m := a.testAlert()
+				if len(a.tabs) > 0 {
+					a.tabs[a.active].model.Append(m)
+				}
+				st.alertStatus = "sent a " + string(m.Alert) + " test alert"
+			}
 		case cur.label == "verify cookies" && st.page == pageYouTube:
 			return a, st.ytCookieAction(a)
 		case cur.label == "google login" && st.page == pageYouTube:
@@ -436,6 +468,8 @@ func (a *App) settingsView() string {
 		title = "Overlay"
 	case pageAppearance:
 		title = "Appearance"
+	case pageAlerts:
+		title = "Alerts"
 	case pageYouTube:
 		title = "YouTube"
 	}
@@ -469,6 +503,8 @@ func (a *App) settingsView() string {
 			val = s.cardTitle.Render("‹ " + r.enumOpts[*r.enump] + " ›")
 		case r.display != nil:
 			val = s.name(chat.Message{Author: "url"}).Render(r.display())
+		case r.label == "send test alert":
+			val = s.dim.Render("enter to fire")
 		case r.label == "verify cookies" && st.page == pageYouTube:
 			val = ytActionVal(s, st.ytCookiesAuthed, st.ytBusy)
 		case r.label == "google login" && st.page == pageYouTube:
@@ -505,6 +541,17 @@ func (a *App) settingsView() string {
 			s.key.Render("esc") + s.dim.Render(" back"))
 	case pageOverlay:
 		b.WriteString(s.dim.Render("on/off, address & channel apply on restart") + "\n")
+		b.WriteString("\n" + s.key.Render("↑/↓") + s.dim.Render(" move · ") +
+			s.key.Render("←/→/enter") + s.dim.Render(" change · ") +
+			s.key.Render("esc") + s.dim.Render(" back"))
+	case pageAlerts:
+		b.WriteString(s.dim.Render("applies live; a separate browser source from the chat overlay") + "\n")
+		if a.followScopeMissing {
+			b.WriteString(s.danger.Render("follows need a re-login: crow logout && crow login") + "\n")
+		}
+		if st.alertStatus != "" {
+			b.WriteString(s.key.Render(st.alertStatus) + "\n")
+		}
 		b.WriteString("\n" + s.key.Render("↑/↓") + s.dim.Render(" move · ") +
 			s.key.Render("←/→/enter") + s.dim.Render(" change · ") +
 			s.key.Render("esc") + s.dim.Render(" back"))

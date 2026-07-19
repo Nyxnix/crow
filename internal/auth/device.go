@@ -23,8 +23,9 @@ var (
 )
 
 // Scopes requested at login. Fixed by what the app does: read chat (chat:read)
-// and send messages (chat:edit) over IRC, and moderate over Helix.
-const Scopes = "chat:read chat:edit moderator:manage:banned_users moderator:manage:chat_messages user:read:email"
+// and send messages (chat:edit) over IRC, moderate over Helix, and poll
+// followers for alerts (moderator:read:followers).
+const Scopes = "chat:read chat:edit moderator:manage:banned_users moderator:manage:chat_messages user:read:email moderator:read:followers"
 
 // DeviceCode is what the user acts on: they open VerificationURI and enter
 // UserCode.

@@ -29,6 +29,9 @@ type Config struct {
 	// splash does not nag them every launch.
 	Anonymous bool `json:"anonymous"`
 
+	// Alerts holds the stream-alert options the alerts browser source reads.
+	Alerts AlertOptions `json:"alerts"`
+
 	// YouTubeCookies is the user's youtube.com Cookie header, the primary way
 	// crow acts as their account on YouTube (send, moderate, card info) via the
 	// same innertube endpoints the web player uses — no Google Cloud client or
@@ -59,6 +62,20 @@ type OverlayOptions struct {
 	Bots         string `json:"bots"`          // comma-separated logins to hide
 }
 
+// AlertOptions are the stream-alert parameters, pushed to the alerts overlay
+// page over SSE and used by the TUI to decide which alerts to surface.
+type AlertOptions struct {
+	Enabled     bool `json:"enabled"`
+	Follows     bool `json:"follows"`
+	Subs        bool `json:"subs"` // subs + resubs
+	GiftSubs    bool `json:"gift_subs"`
+	Bits        bool `json:"bits"`
+	Members     bool `json:"members"` // YouTube new member + milestone
+	GiftMembers bool `json:"gift_members"`
+	Superchats  bool `json:"superchats"`
+	Duration    int  `json:"duration"` // seconds each alert stays on screen
+}
+
 // Default is the config used when none is saved yet.
 func Default() Config {
 	return Config{
@@ -73,6 +90,17 @@ func Default() Config {
 			Animate: true,
 			Badges:  true,
 		},
+		Alerts: AlertOptions{
+			Enabled:     true,
+			Follows:     true,
+			Subs:        true,
+			GiftSubs:    true,
+			Bits:        true,
+			Members:     true,
+			GiftMembers: true,
+			Superchats:  true,
+			Duration:    6,
+		},
 	}
 }
 
@@ -80,6 +108,12 @@ func Default() Config {
 // pushes the display options to the page over SSE, so nothing rides the URL.
 func (c Config) OverlayURL() string {
 	return "http://" + c.OverlayAddr + "/"
+}
+
+// AlertsURL is the alerts browser-source URL for OBS, a separate page so alert
+// popups can be positioned independently of the chat overlay.
+func (c Config) AlertsURL() string {
+	return "http://" + c.OverlayAddr + "/alerts"
 }
 
 func path() (string, error) {
@@ -109,6 +143,9 @@ func Load() Config {
 	}
 	if c.ChatScale < 1 {
 		c.ChatScale = 1 // configs saved before this field existed decode as 0
+	}
+	if c.Alerts.Duration < 1 {
+		c.Alerts.Duration = Default().Alerts.Duration
 	}
 	return c
 }

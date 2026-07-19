@@ -83,12 +83,65 @@ func TestParseChat(t *testing.T) {
 	if sc.Text != "$5.00 take my money" || sc.ID != "sc1" {
 		t.Errorf("superchat = %+v", sc)
 	}
+	if sc.Alert != chat.AlertSuperchat || sc.AlertText != "Rich sent $5.00" {
+		t.Errorf("superchat alert = %q %q", sc.Alert, sc.AlertText)
+	}
 
 	if events[0].Kind != chat.DeleteMessage || events[0].MessageID != "msg0" {
 		t.Errorf("delete event = %+v", events[0])
 	}
 	if events[1].Kind != chat.ClearUser || events[1].UserID != "UCbad" || events[1].Login != "UCbad" {
 		t.Errorf("clear event = %+v", events[1])
+	}
+}
+
+// Membership items and gift-purchase announcements become member alerts.
+func TestParseChatMemberships(t *testing.T) {
+	const sample = `{
+"continuationContents": {"liveChatContinuation": {
+  "actions": [
+    {"addChatItemAction": {"item": {"liveChatMembershipItemRenderer": {
+      "id": "mem1",
+      "timestampUsec": "1721000002000000",
+      "authorName": {"simpleText": "NewFan"},
+      "authorExternalChannelId": "UCnew",
+      "headerSubtext": {"runs": [{"text": "Welcome to Nyx memberships!"}]}
+    }}}},
+    {"addChatItemAction": {"item": {"liveChatMembershipItemRenderer": {
+      "id": "mem2",
+      "timestampUsec": "1721000003000000",
+      "authorName": {"simpleText": "OldFan"},
+      "authorExternalChannelId": "UCold",
+      "headerPrimaryText": {"runs": [{"text": "Member for "}, {"text": "6"}, {"text": " months"}]},
+      "message": {"runs": [{"text": "still here"}]}
+    }}}},
+    {"addChatItemAction": {"item": {"liveChatSponsorshipsGiftPurchaseAnnouncementRenderer": {
+      "id": "gift1",
+      "timestampUsec": "1721000004000000",
+      "authorExternalChannelId": "UCgift",
+      "header": {"liveChatSponsorshipsHeaderRenderer": {
+        "authorName": {"simpleText": "Santa"},
+        "primaryText": {"runs": [{"text": "Gifted "}, {"text": "5"}, {"text": " Nyx memberships"}]}
+      }}
+    }}}}
+  ]
+}}}`
+
+	msgs, _, _, _ := parseChat([]byte(sample), "yt-tab")
+	if len(msgs) != 3 {
+		t.Fatalf("got %d msgs, want 3", len(msgs))
+	}
+
+	if m := msgs[0]; m.Alert != chat.AlertMember || m.AlertText != "NewFan became a member" {
+		t.Errorf("new member alert = %q %q", m.Alert, m.AlertText)
+	}
+	if m := msgs[1]; m.Alert != chat.AlertMember || m.AlertText != "OldFan — Member for 6 months" ||
+		m.Text != "still here" {
+		t.Errorf("milestone alert = %q %q text=%q", m.Alert, m.AlertText, m.Text)
+	}
+	if m := msgs[2]; m.Alert != chat.AlertGiftMember || m.AlertText != "Santa Gifted 5 Nyx memberships" ||
+		m.Author != "Santa" || m.AuthorID != "UCgift" || m.ID != "gift1" {
+		t.Errorf("gift alert = %+v", m)
 	}
 }
 

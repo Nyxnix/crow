@@ -23,8 +23,10 @@ type liveChatResponse struct {
 			Actions []struct {
 				AddChatItemAction struct {
 					Item struct {
-						LiveChatTextMessageRenderer *messageRenderer `json:"liveChatTextMessageRenderer"`
-						LiveChatPaidMessageRenderer *messageRenderer `json:"liveChatPaidMessageRenderer"`
+						LiveChatTextMessageRenderer                          *messageRenderer          `json:"liveChatTextMessageRenderer"`
+						LiveChatPaidMessageRenderer                          *messageRenderer          `json:"liveChatPaidMessageRenderer"`
+						LiveChatMembershipItemRenderer                       *messageRenderer          `json:"liveChatMembershipItemRenderer"`
+						LiveChatSponsorshipsGiftPurchaseAnnouncementRenderer *giftAnnouncementRenderer `json:"liveChatSponsorshipsGiftPurchaseAnnouncementRenderer"`
 					} `json:"item"`
 				} `json:"addChatItemAction"`
 				MarkChatItemAsDeletedAction struct {
@@ -66,11 +68,39 @@ type messageRenderer struct {
 	PurchaseAmountText struct {
 		SimpleText string `json:"simpleText"`
 	} `json:"purchaseAmountText"`
+	// Membership items carry their event line in headers instead of Message:
+	// milestones use headerPrimaryText ("Member for 6 months"), new members
+	// only headerSubtext ("Welcome to ... membership!").
+	HeaderPrimaryText struct {
+		Runs []messageRun `json:"runs"`
+	} `json:"headerPrimaryText"`
+	HeaderSubtext struct {
+		SimpleText string       `json:"simpleText"`
+		Runs       []messageRun `json:"runs"`
+	} `json:"headerSubtext"`
 	ContextMenuEndpoint struct {
 		LiveChatItemContextMenuEndpoint struct {
 			Params string `json:"params"`
 		} `json:"liveChatItemContextMenuEndpoint"`
 	} `json:"contextMenuEndpoint"`
+}
+
+// giftAnnouncementRenderer is a gifted-memberships purchase announcement, whose
+// author and text live under a header renderer rather than the message shape.
+type giftAnnouncementRenderer struct {
+	ID                      string `json:"id"`
+	TimestampUsec           string `json:"timestampUsec"`
+	AuthorExternalChannelID string `json:"authorExternalChannelId"`
+	Header                  struct {
+		LiveChatSponsorshipsHeaderRenderer struct {
+			AuthorName struct {
+				SimpleText string `json:"simpleText"`
+			} `json:"authorName"`
+			PrimaryText struct {
+				Runs []messageRun `json:"runs"` // "Gifted 5 ... memberships"
+			} `json:"primaryText"`
+		} `json:"liveChatSponsorshipsHeaderRenderer"`
+	} `json:"header"`
 }
 
 type messageRun struct {
@@ -117,7 +147,34 @@ func parseChat(data []byte, channel string) ([]chat.Message, []chat.ModEvent, st
 			msgs = append(msgs, toMessage(mr, channel))
 		}
 		if mr := a.AddChatItemAction.Item.LiveChatPaidMessageRenderer; mr != nil {
-			msgs = append(msgs, toMessage(mr, channel))
+			m := toMessage(mr, channel)
+			m.Alert = chat.AlertSuperchat
+			m.AlertText = mr.AuthorName.SimpleText + " sent " + mr.PurchaseAmountText.SimpleText
+			msgs = append(msgs, m)
+		}
+		if mr := a.AddChatItemAction.Item.LiveChatMembershipItemRenderer; mr != nil {
+			m := toMessage(mr, channel)
+			m.Alert = chat.AlertMember
+			if event := runsText(mr.HeaderPrimaryText.Runs); event != "" {
+				m.AlertText = mr.AuthorName.SimpleText + " — " + event // milestone
+			} else {
+				m.AlertText = mr.AuthorName.SimpleText + " became a member"
+			}
+			msgs = append(msgs, m)
+		}
+		if gr := a.AddChatItemAction.Item.LiveChatSponsorshipsGiftPurchaseAnnouncementRenderer; gr != nil {
+			hr := gr.Header.LiveChatSponsorshipsHeaderRenderer
+			msgs = append(msgs, chat.Message{
+				ID:          gr.ID,
+				Platform:    chat.YouTube,
+				Channel:     channel,
+				AuthorID:    gr.AuthorExternalChannelID,
+				Author:      hr.AuthorName.SimpleText,
+				AuthorLogin: gr.AuthorExternalChannelID,
+				Alert:       chat.AlertGiftMember,
+				AlertText:   hr.AuthorName.SimpleText + " " + runsText(hr.PrimaryText.Runs),
+				At:          usecTime(gr.TimestampUsec),
+			})
 		}
 		if id := a.MarkChatItemAsDeletedAction.TargetItemID; id != "" {
 			events = append(events, chat.ModEvent{Kind: chat.DeleteMessage, MessageID: id})
@@ -205,6 +262,20 @@ func toMessage(mr *messageRenderer, channel string) chat.Message {
 		}
 	}
 	return m
+}
+
+// runsText flattens runs to plain text, using emoji shortcuts for emoji runs.
+func runsText(rs []messageRun) string {
+	var b strings.Builder
+	for _, r := range rs {
+		switch {
+		case r.Text != "":
+			b.WriteString(r.Text)
+		case r.Emoji != nil && len(r.Emoji.Shortcuts) > 0:
+			b.WriteString(r.Emoji.Shortcuts[0])
+		}
+	}
+	return b.String()
 }
 
 // usecTime reads timestampUsec (Unix microseconds), falling back to now.
