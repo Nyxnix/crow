@@ -185,17 +185,33 @@ func (m *Model) cardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "p":
-		// Pinning is local display, no login needed. ID+Text compared because
-		// own-echo messages carry no id.
-		if m.pinned != nil && m.pinned.ID == c.msg.ID && m.pinned.Text == c.msg.Text {
+		// The pin row is local display and always works; on a Twitch tab with a
+		// message id the same keypress also pins/unpins the channel's actual
+		// chat via Helix. ID+Text compared because own-echo messages carry no
+		// id (which is also why they can't reach Twitch's pin).
+		unpin := m.pinned != nil && m.pinned.ID == c.msg.ID && m.pinned.Text == c.msg.Text
+		if unpin {
 			m.pinned = nil
-			c.status, c.statusErr = "unpinned", false
 		} else {
 			pin := c.msg
 			m.pinned = &pin
-			c.status, c.statusErr = "pinned", false
 		}
-		return m, nil
+		if m.chanMgr == nil || c.msg.ID == "" {
+			c.status, c.statusErr = "pinned (crow only)", false
+			if unpin {
+				c.status = "unpinned"
+			}
+			return m, nil
+		}
+		id, ch := c.msg.ID, m.chanMgr
+		if unpin {
+			return m, runAction(func(ctx context.Context) error {
+				return ch.UnpinMessage(ctx, id)
+			}, "unpinned from chat")
+		}
+		return m, runAction(func(ctx context.Context) error {
+			return ch.PinMessage(ctx, id)
+		}, "pinned to chat")
 	}
 
 	if m.mod == nil {

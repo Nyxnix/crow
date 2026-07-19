@@ -55,3 +55,34 @@ func TestPinToggleAndLayout(t *testing.T) {
 		t.Errorf("viewport = %d, want %d after unpin", got, base)
 	}
 }
+
+// On a Twitch tab, p also pins/unpins the channel's actual chat via Helix.
+func TestPinReachesTwitch(t *testing.T) {
+	ch := &fakeChan{}
+	m, _ := commandModel(t, &fakeMod{}, ch)
+	m.View()
+	click(m, 7, 0)
+	if m.card == nil {
+		t.Fatal("no card")
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	if cmd == nil {
+		t.Fatal("no pin command issued")
+	}
+	if res := cmd().(actionResult); res.err || res.text != "pinned to chat" {
+		t.Fatalf("pin result = %+v", res)
+	}
+	if ch.pinnedMsg != "m1" {
+		t.Errorf("PinMessage got %q, want m1", ch.pinnedMsg)
+	}
+
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	cmd()
+	if ch.unpinnedMsg != "m1" {
+		t.Errorf("UnpinMessage got %q, want m1", ch.unpinnedMsg)
+	}
+	if m.pinned != nil {
+		t.Error("local pin row survived the unpin")
+	}
+}

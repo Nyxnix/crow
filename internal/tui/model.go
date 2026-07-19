@@ -49,6 +49,8 @@ type ChannelManager interface {
 	SetMod(ctx context.Context, userID string, on bool) error
 	ClearChat(ctx context.Context) error
 	ResolveUser(ctx context.Context, login string) (string, error)
+	PinMessage(ctx context.Context, messageID string) error
+	UnpinMessage(ctx context.Context, messageID string) error
 }
 
 // Model is the bubbletea model for the whole app.

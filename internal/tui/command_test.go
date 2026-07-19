@@ -17,11 +17,13 @@ type fakeChan struct {
 	pollT    string
 	pollC    []string
 	pollDur  int
-	raided   string
-	vip      map[string]bool
-	moded    map[string]bool
-	cleared  bool
-	err      error
+	raided      string
+	vip         map[string]bool
+	moded       map[string]bool
+	cleared     bool
+	pinnedMsg   string
+	unpinnedMsg string
+	err         error
 }
 
 func (f *fakeChan) UpdateChatSettings(_ context.Context, p map[string]any) error {
@@ -53,6 +55,14 @@ func (f *fakeChan) SetMod(_ context.Context, id string, on bool) error {
 	return f.err
 }
 func (f *fakeChan) ClearChat(_ context.Context) error { f.cleared = true; return f.err }
+func (f *fakeChan) PinMessage(_ context.Context, id string) error {
+	f.pinnedMsg = id
+	return f.err
+}
+func (f *fakeChan) UnpinMessage(_ context.Context, id string) error {
+	f.unpinnedMsg = id
+	return f.err
+}
 func (f *fakeChan) ResolveUser(_ context.Context, login string) (string, error) {
 	return "id-" + login, f.err
 }

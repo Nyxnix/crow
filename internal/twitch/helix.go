@@ -233,6 +233,28 @@ func (h *Helix) SetMod(ctx context.Context, userID string, on bool) error {
 	return h.do(ctx, method, "/moderation/moderators?"+q.Encode(), nil)
 }
 
+// PinMessage pins a chat message to the top of the channel's chat until the
+// stream ends (no duration_seconds). Twitch keeps one mod-pin per channel and
+// replaces any existing one.
+func (h *Helix) PinMessage(ctx context.Context, messageID string) error {
+	q := url.Values{
+		"broadcaster_id": {h.BroadcasterID},
+		"moderator_id":   {h.ModeratorID},
+		"message_id":     {messageID},
+	}
+	return h.do(ctx, http.MethodPut, "/chat/pins?"+q.Encode(), nil)
+}
+
+// UnpinMessage removes a pinned chat message.
+func (h *Helix) UnpinMessage(ctx context.Context, messageID string) error {
+	q := url.Values{
+		"broadcaster_id": {h.BroadcasterID},
+		"moderator_id":   {h.ModeratorID},
+		"message_id":     {messageID},
+	}
+	return h.do(ctx, http.MethodDelete, "/chat/pins?"+q.Encode(), nil)
+}
+
 // ResolveUser turns a login into its numeric ID, for slash commands naming
 // someone who hasn't spoken recently.
 func (h *Helix) ResolveUser(ctx context.Context, login string) (string, error) {
