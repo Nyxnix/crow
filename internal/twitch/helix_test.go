@@ -7,6 +7,34 @@ import (
 	"testing"
 )
 
+// TestPollStatus covers the GET-with-response shape; PredictionStatus is the
+// same get() pattern with different field names.
+func TestPollStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/polls" || r.URL.Query().Get("broadcaster_id") != "b1" {
+			t.Errorf("request = %s %s", r.Method, r.URL)
+		}
+		w.Write([]byte(`{"data":[{"title":"Best?","status":"ACTIVE","duration":120,
+			"started_at":"2026-07-19T12:00:00Z",
+			"choices":[{"title":"yes","votes":7},{"title":"no","votes":3}]}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	old := helixBase
+	helixBase = srv.URL
+	t.Cleanup(func() { helixBase = old })
+
+	h := &Helix{ClientID: "cid", Token: "tok", BroadcasterID: "b1"}
+	p, err := h.PollStatus(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Kind != "poll" || p.Title != "Best?" || p.Status != "ACTIVE" ||
+		len(p.Choices) != 2 || p.Choices[0].Votes != 7 ||
+		p.EndsAt.Format("15:04") != "12:02" {
+		t.Errorf("poll = %+v", p)
+	}
+}
+
 // helixRecorder stands in for Helix and captures the one request a method
 // makes. The remaining new methods are the same do() one-liners as the
 // already-tested Timeout shape, so these two cover the non-trivial bodies.

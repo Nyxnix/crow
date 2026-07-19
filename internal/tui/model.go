@@ -51,6 +51,8 @@ type ChannelManager interface {
 	ResolveUser(ctx context.Context, login string) (string, error)
 	PinMessage(ctx context.Context, messageID string) error
 	UnpinMessage(ctx context.Context, messageID string) error
+	PollStatus(ctx context.Context) (chat.Poll, error)
+	PredictionStatus(ctx context.Context) (chat.Poll, error)
 }
 
 // Model is the bubbletea model for the whole app.
@@ -93,6 +95,11 @@ type Model struct {
 	// pinned is the message pinned from the user card, shown as a fixed row
 	// above the input. A copy, so it survives the ring buffer trimming past it.
 	pinned *chat.Message
+
+	// vote is the live poll/prediction block, nil when none is running; voteGen
+	// invalidates stale watch timers when a new one starts. See vote.go.
+	vote    *chat.Poll
+	voteGen int
 
 	// overlayUnclaimed reports that the overlay is pinned but no open tab
 	// matched the pin, so it is silently blank; nil to skip the warning.
@@ -261,13 +268,18 @@ func (m *Model) prefetchEmotes(rows int) {
 // what the status bar shows without touching the message buffer.
 func (m *Model) Redraw() { m.onRedraw() }
 
-// Init returns the model's startup command. Ingestion is driven by the host via
-// Append/ApplyModEvent, so the only command here is the input cursor's blink.
+// Init returns the model's startup commands: the input cursor's blink, and a
+// one-shot check for a poll/prediction already running in the channel.
+// Ingestion is driven by the host via Append/ApplyModEvent.
 func (m *Model) Init() tea.Cmd {
+	var cmds []tea.Cmd
 	if m.send != nil {
-		return textinput.Blink
+		cmds = append(cmds, textinput.Blink)
 	}
-	return nil
+	if m.chanMgr != nil {
+		cmds = append(cmds, m.checkVotes())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -293,6 +305,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	}
+
+	// The poll/prediction watch messages (vote.go).
+	if cmd, ok := m.onVote(msg); ok {
+		return m, cmd
+	}
+
+	switch msg := msg.(type) {
 	case cardInfoLoaded:
 		// Ignore a response for a card that was closed or reopened for someone
 		// else while the fetch was in flight.
@@ -526,6 +546,9 @@ func (m *Model) viewportHeight() int {
 	if m.pinned != nil {
 		h-- // pinned message row
 	}
+	if m.vote != nil {
+		h -= 1 + len(m.vote.Choices) // live poll/prediction block
+	}
 	if h < 1 {
 		return 1
 	}
@@ -652,6 +675,9 @@ func (m *Model) View() string {
 	}
 
 	out := body
+	if m.vote != nil {
+		out += "\n" + strings.Join(m.voteLines(), "\n")
+	}
 	if m.pinned != nil {
 		out += "\n" + m.pinLine()
 	}

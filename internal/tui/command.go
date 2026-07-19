@@ -99,7 +99,7 @@ func (m *Model) runCommand(line string) tea.Cmd {
 		if !ok {
 			return cmdNotice(`usage: /poll "title" "choice1" "choice2" [..] [duration], or bare /poll for the form`, true)
 		}
-		return m.chanAction(func(ctx context.Context) error {
+		return m.voteCreate("poll", func(ctx context.Context) error {
 			return m.chanMgr.CreatePoll(ctx, title, choices, dur, 0)
 		}, "poll created")
 	case "prediction":
@@ -107,7 +107,7 @@ func (m *Model) runCommand(line string) tea.Cmd {
 		if !ok {
 			return cmdNotice(`usage: /prediction "title" "outcome1" "outcome2" [..] [window]`, true)
 		}
-		return m.chanAction(func(ctx context.Context) error {
+		return m.voteCreate("prediction", func(ctx context.Context) error {
 			return m.chanMgr.CreatePrediction(ctx, title, outcomes, win)
 		}, "prediction created")
 
@@ -210,12 +210,33 @@ func (m *Model) chanAction(fn func(context.Context) error, okText string) tea.Cm
 		return cmdNotice("twitch only (needs a single logged-in twitch tab)", true)
 	}
 	return runAction(func(ctx context.Context) error {
-		err := fn(ctx)
-		if err != nil && (strings.HasPrefix(err.Error(), "401") || strings.HasPrefix(err.Error(), "403")) {
-			return fmt.Errorf("%s — re-login may be needed: crow logout && crow login", err)
-		}
-		return err
+		return scopeHint(fn(ctx))
 	}, okText)
+}
+
+// scopeHint appends a re-login pointer to auth failures: the commands need
+// scopes older tokens were never granted.
+func scopeHint(err error) error {
+	if err != nil && (strings.HasPrefix(err.Error(), "401") || strings.HasPrefix(err.Error(), "403")) {
+		return fmt.Errorf("%s — re-login may be needed: crow logout && crow login", err)
+	}
+	return err
+}
+
+// voteCreate starts a poll or prediction; on success the live status block
+// takes over from the plain ok notice (see vote.go).
+func (m *Model) voteCreate(kind string, fn func(context.Context) error, okText string) tea.Cmd {
+	if m.chanMgr == nil {
+		return cmdNotice("twitch only (needs a single logged-in twitch tab)", true)
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := scopeHint(fn(ctx)); err != nil {
+			return actionResult{text: err.Error(), err: true}
+		}
+		return voteStarted{kind: kind, okText: okText}
+	}
 }
 
 func (m *Model) chanSettings(patch map[string]any, okText string) tea.Cmd {

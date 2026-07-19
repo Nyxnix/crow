@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/Nyxnix/crow/internal/chat"
 )
 
 // helixBase is a var, not a const, so tests can point it at a stand-in server;
@@ -264,6 +266,89 @@ func (h *Helix) UnpinMessage(ctx context.Context, messageID string) error {
 // someone who hasn't spoken recently.
 func (h *Helix) ResolveUser(ctx context.Context, login string) (string, error) {
 	return UserID(ctx, h.ClientID, h.Token, login, h.HTTP)
+}
+
+// PollStatus returns the channel's most recent poll with live vote counts;
+// Status is empty when the channel never ran one.
+func (h *Helix) PollStatus(ctx context.Context) (chat.Poll, error) {
+	var body struct {
+		Data []struct {
+			Title     string    `json:"title"`
+			Status    string    `json:"status"`
+			Duration  int       `json:"duration"`
+			StartedAt time.Time `json:"started_at"`
+			Choices   []struct {
+				Title string `json:"title"`
+				Votes int    `json:"votes"`
+			} `json:"choices"`
+		} `json:"data"`
+	}
+	err := h.get(ctx, "/polls?first=1&broadcaster_id="+url.QueryEscape(h.BroadcasterID), &body)
+	if err != nil || len(body.Data) == 0 {
+		return chat.Poll{}, err
+	}
+	d := body.Data[0]
+	p := chat.Poll{
+		Kind:   "poll",
+		Title:  d.Title,
+		Status: d.Status,
+		EndsAt: d.StartedAt.Add(time.Duration(d.Duration) * time.Second),
+	}
+	for _, c := range d.Choices {
+		p.Choices = append(p.Choices, chat.PollChoice{Title: c.Title, Votes: c.Votes})
+	}
+	return p, nil
+}
+
+// PredictionStatus mirrors PollStatus for predictions; Votes carries the
+// channel points staked on each outcome, and EndsAt is when entries lock.
+func (h *Helix) PredictionStatus(ctx context.Context) (chat.Poll, error) {
+	var body struct {
+		Data []struct {
+			Title            string    `json:"title"`
+			Status           string    `json:"status"`
+			PredictionWindow int       `json:"prediction_window"`
+			CreatedAt        time.Time `json:"created_at"`
+			Outcomes         []struct {
+				Title         string `json:"title"`
+				ChannelPoints int    `json:"channel_points"`
+			} `json:"outcomes"`
+		} `json:"data"`
+	}
+	err := h.get(ctx, "/predictions?first=1&broadcaster_id="+url.QueryEscape(h.BroadcasterID), &body)
+	if err != nil || len(body.Data) == 0 {
+		return chat.Poll{}, err
+	}
+	d := body.Data[0]
+	p := chat.Poll{
+		Kind:   "prediction",
+		Title:  d.Title,
+		Status: d.Status,
+		EndsAt: d.CreatedAt.Add(time.Duration(d.PredictionWindow) * time.Second),
+	}
+	for _, o := range d.Outcomes {
+		p.Choices = append(p.Choices, chat.PollChoice{Title: o.Title, Votes: o.ChannelPoints})
+	}
+	return p, nil
+}
+
+// get issues one Helix GET and decodes the response into out.
+func (h *Helix) get(ctx context.Context, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, helixBase+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Client-Id", h.ClientID)
+	req.Header.Set("Authorization", "Bearer "+h.Token)
+	resp, err := h.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return apiError(resp)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 // do issues one Helix call. body is JSON-encoded when non-nil.

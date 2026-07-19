@@ -52,8 +52,8 @@ func TestPollFormSubmits(t *testing.T) {
 	if m.pollForm != nil {
 		t.Error("form stayed open after submit")
 	}
-	if res := cmd().(actionResult); res.err {
-		t.Fatalf("submit failed: %s", res.text)
+	if started, ok := cmd().(voteStarted); !ok || started.kind != "poll" {
+		t.Fatalf("submit did not start the live watch: %#v", started)
 	}
 	if ch.pollT != "Best letter?" || len(ch.pollC) != 2 || ch.pollDur != 120 || ch.pollPoints != 500 {
 		t.Errorf("poll = %q %v %ds %dpts", ch.pollT, ch.pollC, ch.pollDur, ch.pollPoints)

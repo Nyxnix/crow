@@ -24,6 +24,8 @@ type fakeChan struct {
 	cleared     bool
 	pinnedMsg   string
 	unpinnedMsg string
+	pollState   chat.Poll
+	predState   chat.Poll
 	err         error
 }
 
@@ -67,6 +69,8 @@ func (f *fakeChan) UnpinMessage(_ context.Context, id string) error {
 func (f *fakeChan) ResolveUser(_ context.Context, login string) (string, error) {
 	return "id-" + login, f.err
 }
+func (f *fakeChan) PollStatus(_ context.Context) (chat.Poll, error)       { return f.pollState, f.err }
+func (f *fakeChan) PredictionStatus(_ context.Context) (chat.Poll, error) { return f.predState, f.err }
 
 // commandModel is a logged-in single-Twitch-tab model: mod + channel manager.
 func commandModel(t *testing.T, mod Moderator, ch ChannelManager) (*Model, *[]string) {
@@ -158,7 +162,11 @@ func TestSlashSlowPatchesSettings(t *testing.T) {
 func TestSlashPollParsesQuotes(t *testing.T) {
 	ch := &fakeChan{}
 	m, _ := commandModel(t, &fakeMod{}, ch)
-	run(t, m, `/poll "Best letter?" "a" "b or c" 2m`)
+	typeRunes(m, `/poll "Best letter?" "a" "b or c" 2m`)
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if _, ok := cmd().(voteStarted); !ok {
+		t.Fatal("a successful poll did not start the live watch")
+	}
 	if ch.pollT != "Best letter?" || !reflect.DeepEqual(ch.pollC, []string{"a", "b or c"}) || ch.pollDur != 120 {
 		t.Errorf("poll = %q %#v %ds", ch.pollT, ch.pollC, ch.pollDur)
 	}

@@ -137,7 +137,7 @@ func (m *Model) startPoll() tea.Cmd {
 	}
 
 	m.pollForm = nil
-	return m.chanAction(func(ctx context.Context) error {
+	return m.voteCreate("poll", func(ctx context.Context) error {
 		return m.chanMgr.CreatePoll(ctx, title, choices, dur, points)
 	}, "poll started: "+title)
 }
