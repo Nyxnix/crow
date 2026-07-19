@@ -50,7 +50,7 @@ func TestUpdateChatSettings(t *testing.T) {
 
 func TestCreatePoll(t *testing.T) {
 	h, req, body := helixRecorder(t)
-	if err := h.CreatePoll(t.Context(), "Best?", []string{"yes", "no"}, 120); err != nil {
+	if err := h.CreatePoll(t.Context(), "Best?", []string{"yes", "no"}, 120, 500); err != nil {
 		t.Fatal(err)
 	}
 	if req.Method != http.MethodPost || req.URL.Path != "/polls" {
@@ -62,11 +62,14 @@ func TestCreatePoll(t *testing.T) {
 		Choices       []struct {
 			Title string `json:"title"`
 		} `json:"choices"`
-		Duration int `json:"duration"`
+		Duration  int  `json:"duration"`
+		CPEnabled bool `json:"channel_points_voting_enabled"`
+		CPPer     int  `json:"channel_points_per_vote"`
 	}
 	json.Unmarshal(*body, &got)
 	if got.BroadcasterID != "b1" || got.Title != "Best?" || got.Duration != 120 ||
-		len(got.Choices) != 2 || got.Choices[0].Title != "yes" || got.Choices[1].Title != "no" {
+		len(got.Choices) != 2 || got.Choices[0].Title != "yes" || got.Choices[1].Title != "no" ||
+		!got.CPEnabled || got.CPPer != 500 {
 		t.Errorf("body = %+v", got)
 	}
 }

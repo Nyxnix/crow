@@ -42,7 +42,7 @@ type Moderator interface {
 type ChannelManager interface {
 	UpdateChatSettings(ctx context.Context, patch map[string]any) error
 	Announce(ctx context.Context, text string) error
-	CreatePoll(ctx context.Context, title string, choices []string, durationSecs int) error
+	CreatePoll(ctx context.Context, title string, choices []string, durationSecs, pointsPerVote int) error
 	CreatePrediction(ctx context.Context, title string, outcomes []string, windowSecs int) error
 	Raid(ctx context.Context, toBroadcasterID string) error
 	SetVIP(ctx context.Context, userID string, on bool) error
@@ -69,6 +69,7 @@ type Model struct {
 	emoteHits []ehit
 	card      *card
 	emoteCard *emoteCard
+	pollForm  *pollForm
 
 	// lastRender is the message snapshot the current hit boxes index into, so a
 	// click maps to the right message regardless of buffer changes since render.
@@ -375,6 +376,10 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.card != nil {
 		return m.cardKey(msg)
 	}
+	// So does the poll form.
+	if m.pollForm != nil {
+		return m.pollFormKey(msg)
+	}
 
 	// Keys that mean the same thing in either mode.
 	switch msg.String() {
@@ -456,6 +461,11 @@ func (m *Model) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
+	// The poll form holds typed content, so a stray click must not dismiss it
+	// the way it dismisses the passive popups.
+	if m.pollForm != nil {
+		return m, nil
+	}
 	// A click anywhere while a popup is open dismisses it, matching how the
 	// same overlay behaves on Twitch itself.
 	if m.emoteCard != nil {
@@ -525,7 +535,7 @@ func (m *Model) viewportHeight() int {
 // chatWidth is the width available to message text, which shrinks when the card
 // takes the right-hand column.
 func (m *Model) chatWidth() int {
-	if m.card == nil && m.emoteCard == nil {
+	if m.card == nil && m.emoteCard == nil && m.pollForm == nil {
 		return m.width
 	}
 	w := m.width - cardOuterWidth - cardGutter
@@ -541,7 +551,7 @@ func (m *Model) chatWidth() int {
 // chat by column-composited strings whose width measurement can't see through
 // OSC 66 wrapping, so an open card drops chat to 1x until it closes.
 func (m *Model) effScale() int {
-	if m.scale > 1 && m.card == nil && m.emoteCard == nil {
+	if m.scale > 1 && m.card == nil && m.emoteCard == nil && m.pollForm == nil {
 		return m.scale
 	}
 	return 1
@@ -637,6 +647,8 @@ func (m *Model) View() string {
 		body = m.renderCard(body)
 	case m.emoteCard != nil:
 		body = m.renderEmoteCard(body)
+	case m.pollForm != nil:
+		body = m.renderPollForm(body)
 	}
 
 	out := body

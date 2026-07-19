@@ -86,12 +86,21 @@ func (m *Model) runCommand(line string) tea.Cmd {
 		}, "announced")
 
 	case "poll":
+		// Bare /poll opens the interactive form, mirroring Twitch's own popup;
+		// the quoted one-liner stays for the quick case.
+		if len(args) == 0 {
+			if m.chanMgr == nil {
+				return cmdNotice("twitch only (needs a single logged-in twitch tab)", true)
+			}
+			m.pollForm = newPollForm()
+			return nil
+		}
 		title, choices, dur, ok := parseVote(args, 60)
 		if !ok {
-			return cmdNotice(`usage: /poll "title" "choice1" "choice2" [..] [duration]`, true)
+			return cmdNotice(`usage: /poll "title" "choice1" "choice2" [..] [duration], or bare /poll for the form`, true)
 		}
 		return m.chanAction(func(ctx context.Context) error {
-			return m.chanMgr.CreatePoll(ctx, title, choices, dur)
+			return m.chanMgr.CreatePoll(ctx, title, choices, dur, 0)
 		}, "poll created")
 	case "prediction":
 		title, outcomes, win, ok := parseVote(args, 120)

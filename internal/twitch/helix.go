@@ -161,9 +161,9 @@ func (h *Helix) Announce(ctx context.Context, text string) error {
 		map[string]string{"message": text})
 }
 
-// CreatePoll starts a poll. Broadcaster-only and Affiliate+; Helix enforces
-// both and its error says so.
-func (h *Helix) CreatePoll(ctx context.Context, title string, choices []string, durationSecs int) error {
+// CreatePoll starts a poll, with channel-points voting when pointsPerVote > 0.
+// Broadcaster-only and Affiliate+; Helix enforces both and its error says so.
+func (h *Helix) CreatePoll(ctx context.Context, title string, choices []string, durationSecs, pointsPerVote int) error {
 	type choice struct {
 		Title string `json:"title"`
 	}
@@ -171,12 +171,17 @@ func (h *Helix) CreatePoll(ctx context.Context, title string, choices []string, 
 	for i, c := range choices {
 		cs[i] = choice{c}
 	}
-	return h.do(ctx, http.MethodPost, "/polls", map[string]any{
+	body := map[string]any{
 		"broadcaster_id": h.BroadcasterID,
 		"title":          title,
 		"choices":        cs,
 		"duration":       durationSecs,
-	})
+	}
+	if pointsPerVote > 0 {
+		body["channel_points_voting_enabled"] = true
+		body["channel_points_per_vote"] = pointsPerVote
+	}
+	return h.do(ctx, http.MethodPost, "/polls", body)
 }
 
 // CreatePrediction starts a prediction with the given outcomes.

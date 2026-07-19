@@ -14,9 +14,10 @@ import (
 type fakeChan struct {
 	settings map[string]any
 	announce string
-	pollT    string
-	pollC    []string
-	pollDur  int
+	pollT      string
+	pollC      []string
+	pollDur    int
+	pollPoints int
 	raided      string
 	vip         map[string]bool
 	moded       map[string]bool
@@ -31,8 +32,8 @@ func (f *fakeChan) UpdateChatSettings(_ context.Context, p map[string]any) error
 	return f.err
 }
 func (f *fakeChan) Announce(_ context.Context, t string) error { f.announce = t; return f.err }
-func (f *fakeChan) CreatePoll(_ context.Context, title string, choices []string, secs int) error {
-	f.pollT, f.pollC, f.pollDur = title, choices, secs
+func (f *fakeChan) CreatePoll(_ context.Context, title string, choices []string, secs, points int) error {
+	f.pollT, f.pollC, f.pollDur, f.pollPoints = title, choices, secs, points
 	return f.err
 }
 func (f *fakeChan) CreatePrediction(_ context.Context, title string, outcomes []string, secs int) error {
