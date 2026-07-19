@@ -15,6 +15,15 @@ import (
 // message id — nobody can type those.
 const helpLine = "/timeout /ban /unban /delete · /clear /slow[off] /followers[off] /emoteonly[off] /uniquechat[off] · /announce /poll /prediction /raid · /vip /unvip /mod /unmod"
 
+// commandNames feeds Tab completion; keep it in step with runCommand's switch
+// (and /me, which passes through as a message).
+var commandNames = []string{
+	"announce", "ban", "clear", "delete", "emoteonly", "emoteonlyoff",
+	"followers", "followersoff", "help", "me", "mod", "poll", "prediction",
+	"raid", "slow", "slowoff", "timeout", "unban", "uniquechat",
+	"uniquechatoff", "unmod", "unvip", "vip",
+}
+
 // cmdNotice returns an immediate actionResult, for outcomes decided before any
 // network call (usage errors, missing capability).
 func cmdNotice(text string, err bool) tea.Cmd {

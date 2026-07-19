@@ -41,11 +41,20 @@ func (m *Model) completeTab() {
 	}
 
 	var cands []string
-	if after, ok := strings.CutPrefix(word, "@"); ok {
-		for _, u := range m.userCandidates(after) {
+	switch {
+	case start == 0 && strings.HasPrefix(word, "/"):
+		// A leading slash at the start of the input is a command.
+		p := strings.ToLower(word[1:])
+		for _, name := range commandNames {
+			if strings.HasPrefix(name, p) {
+				cands = append(cands, "/"+name)
+			}
+		}
+	case strings.HasPrefix(word, "@"):
+		for _, u := range m.userCandidates(word[1:]) {
 			cands = append(cands, "@"+u)
 		}
-	} else {
+	default:
 		cands = append(m.emoteCandidates(word), m.userCandidates(word)...)
 	}
 	if len(cands) == 0 {

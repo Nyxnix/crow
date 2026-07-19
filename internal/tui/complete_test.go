@@ -96,6 +96,28 @@ func TestBareWordPrefersEmotes(t *testing.T) {
 	}
 }
 
+func TestTabCompletesSlashCommands(t *testing.T) {
+	m := completeModel(t)
+	typeRunes(m, "/sl")
+	pressTab(m)
+	if got := m.input.Value(); got != "/slow" {
+		t.Fatalf("value = %q, want /slow", got)
+	}
+	pressTab(m)
+	if got := m.input.Value(); got != "/slowoff" {
+		t.Errorf("cycle = %q, want /slowoff", got)
+	}
+
+	// A slash mid-message is not a command, so it gets no command candidates.
+	m.input.Reset()
+	m.comp = nil
+	typeRunes(m, "half /sl")
+	pressTab(m)
+	if got := m.input.Value(); got != "half /sl" {
+		t.Errorf("mid-message slash completed to %q", got)
+	}
+}
+
 func TestTabNilRegistry(t *testing.T) {
 	m := NewModel(Options{Channel: "buh", Send: func(string) {}})
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
