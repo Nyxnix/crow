@@ -85,6 +85,17 @@ func (r *Registry) All() []Emote {
 	return out
 }
 
+// Add inserts one emote, for tests and manual additions; Load remains the way
+// real channels are populated.
+func (r *Registry) Add(e Emote) {
+	r.mu.Lock()
+	if r.byName == nil {
+		r.byName = map[string]Emote{}
+	}
+	r.byName[e.Name] = e
+	r.mu.Unlock()
+}
+
 // Len reports how many emotes are loaded, for the TUI's status line.
 func (r *Registry) Len() int {
 	r.mu.RLock()

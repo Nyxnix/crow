@@ -132,6 +132,113 @@ func (h *Helix) DeleteMessage(ctx context.Context, messageID string) error {
 	return h.do(ctx, http.MethodDelete, "/moderation/chat?"+q.Encode(), nil)
 }
 
+// modQuery is the broadcaster+moderator pair every "acting as a mod in this
+// channel" endpoint wants.
+func (h *Helix) modQuery() string {
+	q := url.Values{
+		"broadcaster_id": {h.BroadcasterID},
+		"moderator_id":   {h.ModeratorID},
+	}
+	return q.Encode()
+}
+
+// ClearChat removes all chat messages: the delete-message endpoint with no
+// message_id.
+func (h *Helix) ClearChat(ctx context.Context) error {
+	return h.do(ctx, http.MethodDelete, "/moderation/chat?"+h.modQuery(), nil)
+}
+
+// UpdateChatSettings patches the channel's chat modes (slow, follower-only,
+// emote-only, unique). The patch is passed through as-is; Helix validates
+// values and reports usable errors, so they are not re-validated here.
+func (h *Helix) UpdateChatSettings(ctx context.Context, patch map[string]any) error {
+	return h.do(ctx, http.MethodPatch, "/chat/settings?"+h.modQuery(), patch)
+}
+
+// Announce posts a highlighted announcement to chat.
+func (h *Helix) Announce(ctx context.Context, text string) error {
+	return h.do(ctx, http.MethodPost, "/chat/announcements?"+h.modQuery(),
+		map[string]string{"message": text})
+}
+
+// CreatePoll starts a poll. Broadcaster-only and Affiliate+; Helix enforces
+// both and its error says so.
+func (h *Helix) CreatePoll(ctx context.Context, title string, choices []string, durationSecs int) error {
+	type choice struct {
+		Title string `json:"title"`
+	}
+	cs := make([]choice, len(choices))
+	for i, c := range choices {
+		cs[i] = choice{c}
+	}
+	return h.do(ctx, http.MethodPost, "/polls", map[string]any{
+		"broadcaster_id": h.BroadcasterID,
+		"title":          title,
+		"choices":        cs,
+		"duration":       durationSecs,
+	})
+}
+
+// CreatePrediction starts a prediction with the given outcomes.
+func (h *Helix) CreatePrediction(ctx context.Context, title string, outcomes []string, windowSecs int) error {
+	type outcome struct {
+		Title string `json:"title"`
+	}
+	outs := make([]outcome, len(outcomes))
+	for i, o := range outcomes {
+		outs[i] = outcome{o}
+	}
+	return h.do(ctx, http.MethodPost, "/predictions", map[string]any{
+		"broadcaster_id":    h.BroadcasterID,
+		"title":             title,
+		"outcomes":          outs,
+		"prediction_window": windowSecs,
+	})
+}
+
+// Raid starts a raid from the watched channel. Helix 401s unless the token
+// owns that channel — exactly Twitch's own /raid rule, so it is surfaced, not
+// pre-checked.
+func (h *Helix) Raid(ctx context.Context, toBroadcasterID string) error {
+	q := url.Values{
+		"from_broadcaster_id": {h.BroadcasterID},
+		"to_broadcaster_id":   {toBroadcasterID},
+	}
+	return h.do(ctx, http.MethodPost, "/raids?"+q.Encode(), nil)
+}
+
+// SetVIP grants or removes a user's VIP status.
+func (h *Helix) SetVIP(ctx context.Context, userID string, on bool) error {
+	q := url.Values{
+		"broadcaster_id": {h.BroadcasterID},
+		"user_id":        {userID},
+	}
+	method := http.MethodPost
+	if !on {
+		method = http.MethodDelete
+	}
+	return h.do(ctx, method, "/channels/vips?"+q.Encode(), nil)
+}
+
+// SetMod grants or removes a user's moderator status.
+func (h *Helix) SetMod(ctx context.Context, userID string, on bool) error {
+	q := url.Values{
+		"broadcaster_id": {h.BroadcasterID},
+		"user_id":        {userID},
+	}
+	method := http.MethodPost
+	if !on {
+		method = http.MethodDelete
+	}
+	return h.do(ctx, method, "/moderation/moderators?"+q.Encode(), nil)
+}
+
+// ResolveUser turns a login into its numeric ID, for slash commands naming
+// someone who hasn't spoken recently.
+func (h *Helix) ResolveUser(ctx context.Context, login string) (string, error) {
+	return UserID(ctx, h.ClientID, h.Token, login, h.HTTP)
+}
+
 // do issues one Helix call. body is JSON-encoded when non-nil.
 func (h *Helix) do(ctx context.Context, method, path string, body any) error {
 	var rdr io.Reader

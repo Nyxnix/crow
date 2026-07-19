@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/Nyxnix/crow/internal/chat"
 	"github.com/Nyxnix/crow/internal/emote"
@@ -32,6 +33,22 @@ type Moderator interface {
 	Ban(ctx context.Context, userID, reason string) error
 	Unban(ctx context.Context, userID string) error
 	DeleteMessage(ctx context.Context, messageID string) error
+}
+
+// ChannelManager runs the Twitch-only slash commands (chat modes, polls,
+// raids, roles). Like Moderator it is defined by what the TUI needs and is nil
+// on tabs that aren't a single logged-in Twitch channel, where those commands
+// explain themselves instead of running.
+type ChannelManager interface {
+	UpdateChatSettings(ctx context.Context, patch map[string]any) error
+	Announce(ctx context.Context, text string) error
+	CreatePoll(ctx context.Context, title string, choices []string, durationSecs int) error
+	CreatePrediction(ctx context.Context, title string, outcomes []string, windowSecs int) error
+	Raid(ctx context.Context, toBroadcasterID string) error
+	SetVIP(ctx context.Context, userID string, on bool) error
+	SetMod(ctx context.Context, userID string, on bool) error
+	ClearChat(ctx context.Context) error
+	ResolveUser(ctx context.Context, login string) (string, error)
 }
 
 // Model is the bubbletea model for the whole app.
@@ -57,9 +74,22 @@ type Model struct {
 
 	emotes  *emote.Registry
 	mod     Moderator
+	chanMgr ChannelManager
 	info    InfoProvider
 	stats   func() StreamStats // live viewer/uptime stats, nil to hide
 	clients func() int         // connected overlay browser sources
+
+	// comp is the in-progress Tab completion cycle, nil between cycles.
+	comp *completion
+
+	// notice is the latest slash-command outcome, shown in the status bar when
+	// no card is open to display it. Cleared on the next keypress.
+	notice    string
+	noticeErr bool
+
+	// pinned is the message pinned from the user card, shown as a fixed row
+	// above the input. A copy, so it survives the ring buffer trimming past it.
+	pinned *chat.Message
 
 	// overlayUnclaimed reports that the overlay is pinned but no open tab
 	// matched the pin, so it is silently blank; nil to skip the warning.
@@ -96,6 +126,7 @@ type Options struct {
 	Channel string
 	Emotes  *emote.Registry
 	Mod     Moderator
+	Chan    ChannelManager
 	Info    InfoProvider
 	Clients func() int
 
@@ -149,6 +180,7 @@ func NewModel(o Options) *Model {
 		styles:  st,
 		emotes:  o.Emotes,
 		mod:     o.Mod,
+		chanMgr: o.Chan,
 		info:    o.Info,
 		stats:   o.Stats,
 		clients: o.Clients,
@@ -251,6 +283,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.card != nil {
 			m.card.status = msg.text
 			m.card.statusErr = msg.err
+		} else {
+			// No card to show it in (slash commands typed at the input): the
+			// status bar carries the outcome instead.
+			m.notice, m.noticeErr = msg.text, msg.err
 		}
 		return m, nil
 
@@ -324,6 +360,10 @@ func (m *Model) snapshot() []chat.Message {
 }
 
 func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Any keypress retires the previous command's status-bar notice: it has
+	// been seen, and the user is doing the next thing.
+	m.notice = ""
+
 	// The emote card is a passive popup: any key dismisses it.
 	if m.emoteCard != nil {
 		m.emoteCard = nil
@@ -350,14 +390,25 @@ func (m *Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// PgUp/PgDn, and the arrows (which a single-line input ignores). Quit is
 	// ctrl+c only, since 'q' is a character someone may want to type.
 	if m.send != nil {
+		if msg.String() == "tab" {
+			m.completeTab()
+			return m, nil
+		}
+		m.comp = nil // any non-Tab key ends the completion cycle
 		switch msg.String() {
 		case "enter":
 			text := strings.TrimSpace(m.input.Value())
-			if text != "" {
-				m.send(text)
-				m.input.Reset()
-				m.scroll = 0 // snap to live so the user sees their own message land
+			if text == "" {
+				return m, nil
 			}
+			m.input.Reset()
+			// A leading "/" is a command, except /me, which Twitch IRC still
+			// turns into an ACTION when sent as a message.
+			if strings.HasPrefix(text, "/") && strings.Fields(text)[0] != "/me" {
+				return m, m.runCommand(text)
+			}
+			m.send(text)
+			m.scroll = 0 // snap to live so the user sees their own message land
 			return m, nil
 		case "up":
 			m.scrollBy(1)
@@ -459,6 +510,9 @@ func (m *Model) viewportHeight() int {
 	h := m.height - 1 // status bar
 	if m.send != nil {
 		h-- // input line
+	}
+	if m.pinned != nil {
+		h-- // pinned message row
 	}
 	if h < 1 {
 		return 1
@@ -584,6 +638,9 @@ func (m *Model) View() string {
 	}
 
 	out := body
+	if m.pinned != nil {
+		out += "\n" + m.pinLine()
+	}
 	if m.send != nil {
 		out += "\n" + m.inputLine()
 	}
@@ -603,6 +660,20 @@ func (m *Model) View() string {
 // branch here.
 func (m *Model) inputLine() string {
 	return m.input.View()
+}
+
+// pinLine renders the pinned message as one fixed plain-text row: scale 1 and
+// no emote images, because kitty's scaled runs and image placeholders desync
+// when bubbletea rewrites a row in place (see layout.go).
+func (m *Model) pinLine() string {
+	text := m.pinned.Text
+	if text == "" {
+		text = m.pinned.AlertText
+	}
+	// Plain "PIN", no emoji: terminals and go-runewidth disagree on emoji
+	// widths (see app.go), and a mis-measured full-width row gets truncated.
+	row := runewidth.Truncate("PIN "+m.pinned.Author+": "+text, m.width, "…")
+	return m.styles.pin.Width(m.width).Render(row)
 }
 
 // StreamStats is the live channel status shown in the status bar.
@@ -635,6 +706,13 @@ func (m *Model) statusBar() string {
 	}
 
 	var parts []string
+	if m.notice != "" {
+		n := m.notice
+		if m.noticeErr {
+			n = "error: " + n
+		}
+		parts = append(parts, n)
+	}
 	if m.emotes != nil {
 		parts = append(parts, fmt.Sprintf("%d emotes", m.emotes.Len()))
 	}

@@ -393,6 +393,7 @@ func openChannel(parent context.Context, spec string, ov *overlay.Server, ovStat
 	single := len(sources) == 1 && sources[0].Platform == chat.Twitch
 	var sendFn func(string)
 	var mod tui.Moderator
+	var chanMgr tui.ChannelManager
 	var statsFn func() tui.StreamStats
 	var info tui.InfoProvider
 	var emotes *emote.Registry
@@ -403,6 +404,7 @@ func openChannel(parent context.Context, spec string, ov *overlay.Server, ovStat
 		info = infoProvider{&ivr.Client{}}
 		if helix = buildModerator(ctx, channel, session); helix != nil {
 			mod = helix // assign only when non-nil: a typed nil would fake a Moderator
+			chanMgr = helix
 		}
 		if session != nil {
 			sender := &twitch.Client{Channel: channel, Nick: session.Login, Token: session.AccessToken, Out: make(chan chat.Message, 16)}
@@ -461,6 +463,7 @@ func openChannel(parent context.Context, spec string, ov *overlay.Server, ovStat
 		Channel:          spec,
 		Emotes:           emotes,
 		Mod:              mod,
+		Chan:             chanMgr,
 		Info:             info,
 		Clients:          clientsFn,
 		OverlayUnclaimed: ovState.unclaimed,

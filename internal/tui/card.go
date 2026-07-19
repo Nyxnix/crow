@@ -67,6 +67,9 @@ type card struct {
 	// msgID is the message that was clicked, which is the one 'd' deletes.
 	msgID string
 
+	// msg is the full clicked message, which is what 'p' pins.
+	msg chat.Message
+
 	// info is the account/sub detail, nil until the fetch returns. infoErr marks
 	// a fetch that failed so the card can say so rather than spin forever.
 	info    *UserInfo
@@ -105,6 +108,7 @@ func (m *Model) openCard(msgIdx int) tea.Cmd {
 		author:   src.Author,
 		platform: src.Platform,
 		msgID:    src.ID,
+		msg:      src,
 	}
 
 	if m.info == nil || src.AuthorLogin == "" {
@@ -180,6 +184,18 @@ func (m *Model) cardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
+	case "p":
+		// Pinning is local display, no login needed. ID+Text compared because
+		// own-echo messages carry no id.
+		if m.pinned != nil && m.pinned.ID == c.msg.ID && m.pinned.Text == c.msg.Text {
+			m.pinned = nil
+			c.status, c.statusErr = "unpinned", false
+		} else {
+			pin := c.msg
+			m.pinned = &pin
+			c.status, c.statusErr = "pinned", false
+		}
+		return m, nil
 	}
 
 	if m.mod == nil {
@@ -389,7 +405,7 @@ func (m *Model) renderCard(body string) string {
 			"   " + s.cardKey.Render("u") + " unban" +
 			"   " + s.cardKey.Render("d") + " delete msg\n")
 	}
-	b.WriteString("  " + s.cardKey.Render("esc") + " close\n")
+	b.WriteString("  " + s.cardKey.Render("p") + " pin/unpin msg   " + s.cardKey.Render("esc") + " close\n")
 
 	if c.confirm != "" {
 		b.WriteString("\n" + s.danger.Render(fmt.Sprintf("%s @%s? (y/n)", c.confirm, c.login)) + "\n")

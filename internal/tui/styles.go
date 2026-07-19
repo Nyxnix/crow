@@ -29,6 +29,7 @@ type styles struct {
 	danger    lipgloss.Style
 	deleted   lipgloss.Style
 	highlight lipgloss.Style // red background: alert lines and mentions of the user
+	pin       lipgloss.Style // the pinned-message row above the input
 
 	// login is the logged-in user's lowercase name, for mention detection.
 	// Empty when not logged in, which disables the mention highlight.
@@ -65,6 +66,7 @@ func newStyles() *styles {
 		danger:    lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true),
 		deleted:   lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Strikethrough(true),
 		highlight: lipgloss.NewStyle().Background(lipgloss.Color("52")).Foreground(lipgloss.Color("231")),
+		pin:       lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("220")),
 
 		tabBar:      lipgloss.NewStyle().Background(lipgloss.Color("236")),
 		tabActive:   lipgloss.NewStyle().Background(lipgloss.Color("99")).Foreground(lipgloss.Color("231")).Bold(true),

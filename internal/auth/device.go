@@ -23,9 +23,11 @@ var (
 )
 
 // Scopes requested at login. Fixed by what the app does: read chat (chat:read)
-// and send messages (chat:edit) over IRC, moderate over Helix, and poll
-// followers for alerts (moderator:read:followers).
-const Scopes = "chat:read chat:edit moderator:manage:banned_users moderator:manage:chat_messages user:read:email moderator:read:followers"
+// and send messages (chat:edit) over IRC, moderate over Helix, poll followers
+// for alerts (moderator:read:followers), and run the slash commands (chat
+// modes, announcements, polls, predictions, raids, vips, mods). Tokens from
+// before a scope was added lack it until `crow logout && crow login`.
+const Scopes = "chat:read chat:edit moderator:manage:banned_users moderator:manage:chat_messages user:read:email moderator:read:followers moderator:manage:chat_settings moderator:manage:announcements channel:manage:polls channel:manage:predictions channel:manage:raids channel:manage:vips channel:manage:moderators"
 
 // DeviceCode is what the user acts on: they open VerificationURI and enter
 // UserCode.
