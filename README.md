@@ -18,12 +18,19 @@ the overlay, and inline in the TUI on terminals that speak the kitty graphics
 protocol (kitty, ghostty, WezTerm).
 
 ![chat with a live poll running](docs/chat.png)
-*Chat with inline emotes and a `/poll` running — the block updates live and
-shows the final numbers when it closes.*
+*Chat with inline badges and emotes, and a `/poll` running — the block updates
+live and shows the final numbers when it closes.*
 
 | ![moderation card](docs/card.png) | ![stream alerts](docs/alerts.png) |
 |---|---|
 | *Click a name: account info, recent messages, mod actions, `p` to pin.* | *Alerts (follows, subs, bits, members, superchats) highlighted in the feed.* |
+
+The two OBS browser sources (shown here on a dark preview background,
+`?bg=<color>`; they're transparent in OBS):
+
+| ![chat overlay](docs/overlay.png) | ![alerts overlay](docs/alert-overlay.png) |
+|---|---|
+| *Chat overlay.* | *Alerts overlay.* |
 
 ## Features
 

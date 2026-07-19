@@ -86,6 +86,11 @@
 (() => {
   "use strict";
 
+  // ?bg=<css-color> fills the normally-transparent background, for previewing
+  // in a plain browser tab instead of OBS.
+  const bg = new URLSearchParams(location.search).get("bg");
+  if (bg) document.body.style.background = bg;
+
   // Keys and defaults match config.AlertOptions' JSON; settings arrive from
   // the server over SSE on connect and whenever they change.
   const defaults = {

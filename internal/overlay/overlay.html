@@ -121,6 +121,10 @@
 
   const q = new URLSearchParams(location.search);
 
+  // ?bg=<css-color> fills the normally-transparent background, for previewing
+  // in a plain browser tab instead of OBS.
+  if (q.get("bg")) document.body.style.background = q.get("bg");
+
   const FONTS = [
     '"Inter", "Segoe UI", system-ui, sans-serif',
     '"Roboto", system-ui, sans-serif',
