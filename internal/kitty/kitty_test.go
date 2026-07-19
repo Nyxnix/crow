@@ -33,6 +33,29 @@ func pngServer(t *testing.T, w, h int) *httptest.Server {
 	}))
 }
 
+// A prefetched image is fetched and decoded but not uploaded to the terminal
+// until something actually renders it — warming a whole emote set must not
+// transmit every image.
+func TestPrefetchDefersUpload(t *testing.T) {
+	srv := pngServer(t, 72, 72)
+	defer srv.Close()
+	c := New(nil)
+	c.HTTP = srv.Client()
+
+	c.Prefetch(srv.URL, 0) // synchronous: loaded on return
+
+	if got := c.FlushUploads(); got != "" {
+		t.Errorf("flush after prefetch = %q, want empty until rendered", got)
+	}
+	// The first render is instant — no async load — and releases the upload.
+	if _, _, ok := c.Render(srv.URL); !ok {
+		t.Fatal("Render after Prefetch should be ready immediately")
+	}
+	if got := c.FlushUploads(); !strings.Contains(got, "\x1b_Ga=T") {
+		t.Error("flush after first render should carry the upload")
+	}
+}
+
 // waitReady polls Render until the image has loaded or the deadline passes.
 func waitReady(t *testing.T, c *Cache, url string) (string, int) {
 	t.Helper()

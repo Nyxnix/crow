@@ -167,6 +167,7 @@ type entry struct {
 	failed      bool      // fetch/decode failed; do not retry
 	readyAt     time.Time // when ready flipped true, for the re-emit window
 	transmitted bool      // upload settled: emitted long enough to be flushed
+	deferred    bool      // prefetched but never rendered: hold its upload
 }
 
 // placeRows is the placement height, treating the inline default (0) as 1.
@@ -228,12 +229,47 @@ func (c *Cache) Render(url string) (s string, cols int, ok bool) {
 		c.mu.Unlock()
 		return "", 0, false
 	}
+	e.undefer()
 	id, cols := e.id, e.cols
 	c.mu.Unlock()
 
 	var b strings.Builder
 	writePlaceholders(&b, id, 0, cols)
 	return b.String(), cols, true
+}
+
+// undefer releases a prefetched image for upload on its first real render. The
+// settle window restarts now rather than back when the prefetch finished, so
+// the upload still survives bubbletea discarding the frame that carried it.
+// Callers hold c.mu.
+func (e *entry) undefer() {
+	if e.deferred {
+		e.deferred, e.readyAt = false, time.Now()
+	}
+}
+
+// Prefetch fetches and decodes url at rows cells tall (<=1 = inline) so its
+// first appearance renders instantly instead of popping in a beat later. It
+// blocks until the image is loaded — callers run it from their own worker pool
+// — and defers the terminal upload until the image actually renders, so
+// warming a whole emote set doesn't transmit every image to the terminal.
+func (c *Cache) Prefetch(url string, rows int) {
+	key := url
+	e := &entry{deferred: true}
+	if rows > 1 {
+		key = fmt.Sprintf("%s#%d", url, rows)
+		e.rows = rows
+	}
+	c.mu.Lock()
+	if _, ok := c.byURL[key]; ok {
+		c.mu.Unlock()
+		return
+	}
+	e.id = c.nextID
+	c.nextID++
+	c.byURL[key] = e
+	c.mu.Unlock()
+	c.load(url, e)
 }
 
 // RenderLarge is Render at rows cells tall: it returns one placeholder string
@@ -260,6 +296,7 @@ func (c *Cache) RenderLarge(url string, rows int) (lines []string, cols int, ok 
 		c.mu.Unlock()
 		return nil, 0, false
 	}
+	e.undefer()
 	id, cols := e.id, e.cols
 	c.mu.Unlock()
 
@@ -292,7 +329,7 @@ func (c *Cache) FlushUploads() string {
 	defer c.mu.Unlock()
 	var b strings.Builder
 	for _, e := range c.byURL {
-		if !e.ready || e.transmitted {
+		if !e.ready || e.transmitted || e.deferred {
 			continue
 		}
 		writeUpload(&b, e)
@@ -338,9 +375,12 @@ func (c *Cache) load(url string, e *entry) {
 		}
 		e.frames, e.delays, e.cols, e.ready, e.readyAt = d.frames, d.delays, cols, true, time.Now()
 	}
+	// A deferred (prefetched) image isn't on screen, so there is nothing to
+	// redraw for it; it pops in via Render the moment something shows it.
+	notify := err == nil && !e.deferred
 	c.mu.Unlock()
 
-	if err == nil && c.onReady != nil {
+	if notify && c.onReady != nil {
 		c.onReady()
 	}
 }

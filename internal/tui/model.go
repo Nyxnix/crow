@@ -74,6 +74,10 @@ type Model struct {
 	// graphics protocol; nil elsewhere, where badges fall back to text.
 	gfx *kitty.Cache
 
+	// prefetched marks that the emote registry's images were warmed into gfx,
+	// which happens once, on the first Append after the registry loads.
+	prefetched bool
+
 	// scale draws chat lines at this multiple via kitty's text sizing protocol
 	// (1 = normal). Set by the App from config, only on terminals that speak it.
 	scale int
@@ -159,8 +163,46 @@ func NewModel(o Options) *Model {
 func (m *Model) Append(msg chat.Message) {
 	m.mu.Lock()
 	m.appendLocked(msg)
+	// The registry swaps all its emotes in at once, so Len>0 means the load
+	// finished: warm the image cache once so emotes render instantly on their
+	// first appearance instead of popping in a beat later.
+	warm := !m.prefetched && m.gfx != nil && m.emotes != nil && m.emotes.Len() > 0
+	if warm {
+		m.prefetched = true
+	}
+	rows := 0
+	if m.scale > 1 {
+		rows = m.scale
+	}
 	m.mu.Unlock()
+	if warm {
+		go m.prefetchEmotes(rows)
+	}
 	m.onRedraw()
+}
+
+// prefetchEmotes fetches every loaded emote's image into the kitty cache.
+// Uploads stay deferred inside the cache until an emote actually renders, and
+// a small worker pool keeps the fetch burst polite to the provider CDNs.
+// ponytail: everything is held decoded in memory for the session; add a cap or
+// LRU if huge animated 7TV sets ever make that hurt.
+func (m *Model) prefetchEmotes(rows int) {
+	work := make(chan emote.Emote)
+	for i := 0; i < 4; i++ {
+		go func() {
+			for e := range work {
+				url := e.URL
+				if e.Animated {
+					url = kitty.AnimatedURL(url)
+				}
+				m.gfx.Prefetch(url, rows)
+			}
+		}()
+	}
+	for _, e := range m.emotes.All() {
+		work <- e
+	}
+	close(work)
 }
 
 // Redraw asks the host to re-render, for callers (the stats poller) that change

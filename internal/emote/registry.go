@@ -74,6 +74,17 @@ func (r *Registry) Lookup(name string) (Emote, bool) {
 	return e, ok
 }
 
+// All returns every loaded emote, for pre-fetching their images.
+func (r *Registry) All() []Emote {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Emote, 0, len(r.byName))
+	for _, e := range r.byName {
+		out = append(out, e)
+	}
+	return out
+}
+
 // Len reports how many emotes are loaded, for the TUI's status line.
 func (r *Registry) Len() int {
 	r.mu.RLock()
