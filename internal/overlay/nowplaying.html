@@ -47,16 +47,9 @@
     font-size: var(--font);
     padding: 14px 18px 14px 14px;
     border-radius: 16px;
-    /* Two soft shadows that finish inside the 16px margin: a shadow wider than
-       that gets sliced off square by the edge of the browser source, which reads
-       as a hard box around the card — worse than no shadow at all. Faint, so the
-       clipped tail is invisible; the blurred cover behind does the real blending.
-       Both scale with the panel, so turning it off leaves no rectangular ghost.
-       No hairline border either: a 1px light edge reads as a harsh line once OBS
-       scales the source down. */
-    box-shadow:
-      0 2px 6px rgba(0, 0, 0, calc(var(--panel) * 0.5)),
-      0 5px 14px rgba(0, 0, 0, calc(var(--panel) * 0.38));
+    /* No box-shadow and no border: both draw the card's exact rounded rectangle,
+       and any hard outline around a panel that fades out at its edges puts the
+       harsh line straight back. The panel layers below do all the blending. */
     transition: opacity 0.3s ease;
     /* Soft shadow rather than the chat overlay's hard four-offset outline: the
        panel already carries the contrast, and this stays legible if the panel
@@ -64,25 +57,29 @@
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6), 0 0 14px rgba(0, 0, 0, 0.4);
   }
 
-  /* The cover, blurred, is the panel: the card takes on the colour of whatever
-     is playing instead of being a grey box. It sits slightly proud of the card
-     and is blurred past its own rounded edge, so the colour spills out and
-     feathers the card's boundary into the video rather than ending on a line. */
+  /* The panel is the cover art, blurred: the card takes on the colour of
+     whatever is playing instead of being a grey box.
+
+     Both layers are blurred as whole elements rather than blurred inside a clip,
+     which is the difference between a soft panel and a rough one — the blur
+     carries their own edges outward into transparency, so the panel dissolves
+     into the video with no boundary anywhere. The blur radius stays under the
+     16px margin the body leaves, so the browser source never slices the falloff
+     back into a straight line. */
   #np::before {
     content: "";
     position: absolute;
-    inset: -10px;
+    inset: 0;
     z-index: -2;
-    border-radius: 26px;
-    background-image: var(--cover, none);
-    background-size: cover;
-    background-position: center;
-    filter: blur(22px) saturate(1.7);
+    border-radius: inherit;
+    background: var(--cover, none) center / cover no-repeat;
+    filter: blur(14px) saturate(1.6);
     opacity: calc(var(--panel) * 0.95);
   }
 
   /* Scrim over it: keeps text legible whatever the artwork looks like, and is
-     the whole panel when there is no artwork. */
+     the whole panel when there is no artwork. Blurred to the same radius so the
+     two edges fade together. */
   #np::after {
     content: "";
     position: absolute;
@@ -91,8 +88,9 @@
     border-radius: inherit;
     background: linear-gradient(
       100deg,
-      rgba(8, 8, 10, calc(var(--panel) * 1.05)),
-      rgba(8, 8, 10, calc(var(--panel) * 0.78)));
+      rgba(8, 8, 10, calc(var(--panel) * 1.1)),
+      rgba(8, 8, 10, calc(var(--panel) * 0.85)));
+    filter: blur(14px);
   }
 
   #np.show { display: flex; }
@@ -134,7 +132,7 @@
     line-height: 1.5;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.55);
+    color: rgba(255, 255, 255, 0.62);
   }
 
   /* One line each: a browser source has a fixed width and a wrapping title
@@ -192,7 +190,7 @@
     font-weight: 600;
     letter-spacing: 0.02em;
     font-variant-numeric: tabular-nums;
-    color: rgba(255, 255, 255, 0.62);
+    color: rgba(255, 255, 255, 0.72);
   }
 
   .progress.hide { display: none; }
