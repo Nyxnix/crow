@@ -30,6 +30,12 @@
     align-items: center;
     gap: 14px;
     width: 100%;
+    box-sizing: border-box;
+    /* Slightly opaque panel: separates the card from busy gameplay behind it
+       without hiding the video. ?panel=<css-color> overrides it. */
+    padding: 12px;
+    border-radius: 10px;
+    background: var(--panel, rgba(0, 0, 0, 0.45));
     /* Same four-offset outline as the chat and alert overlays. */
     text-shadow:
       2px 0 var(--shadow), -2px 0 var(--shadow),
@@ -76,15 +82,30 @@
     opacity: 0.8;
   }
 
-  /* One line each, cut with an ellipsis: a browser source has a fixed width and
-     a wrapping title would shove the progress bar out of frame. */
+  /* One line each: a browser source has a fixed width and a wrapping title
+     would shove the progress bar out of frame. Anything too long to fit
+     scrolls back and forth instead of being cut off. */
   .title, .artist, .album {
     overflow: hidden;
     white-space: nowrap;
-    text-overflow: ellipsis;
   }
 
-  .album:empty, .artist:empty { display: none; }
+  .title > span, .artist > span, .album > span { display: inline-block; }
+
+  .scroll > span {
+    animation: marquee var(--dur, 8s) linear infinite alternate;
+  }
+
+  /* Dwell at both ends (with alternate) so the text is readable when it lands,
+     rather than sliding continuously. */
+  @keyframes marquee {
+    0%, 15%   { transform: none; }
+    85%, 100% { transform: translateX(calc(-1 * var(--over, 0px))); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .scroll > span { animation: none; }
+  }
 
   .bar {
     margin-top: 8px;
@@ -119,9 +140,9 @@
 <div id="np">
   <img id="art" alt="">
   <div class="meta">
-    <div class="title"></div>
-    <div class="artist"></div>
-    <div class="album"></div>
+    <div class="title"><span></span></div>
+    <div class="artist"><span></span></div>
+    <div class="album"><span></span></div>
     <div class="bar"><div class="fill"></div></div>
     <div class="times"><span class="elapsed"></span><span class="total"></span></div>
   </div>
@@ -138,6 +159,10 @@
   // ?art=<px> resizes the cover; the text scales with the source in OBS.
   const art = parseInt(params.get("art"), 10);
   if (art > 0) document.documentElement.style.setProperty("--art", art + "px");
+  // ?panel=<css-color> restyles the panel behind the card, e.g. panel=none for
+  // no backing at all.
+  const panel = params.get("panel");
+  if (panel) document.documentElement.style.setProperty("--panel", panel);
 
   const np = document.getElementById("np");
   const img = document.getElementById("art");
@@ -171,6 +196,27 @@
   }
   requestAnimationFrame(tick);
 
+  // setLine fills one metadata line and, if the text is wider than the source,
+  // starts it scrolling: --over is how far it has to travel, --dur paces that
+  // at a readable ~40px a second plus the dwell at each end.
+  function setLine(el, text) {
+    el.firstElementChild.textContent = text || "";
+    el.style.display = text ? "" : "none";
+    fit(el);
+  }
+
+  function fit(el) {
+    el.classList.remove("scroll"); // measure untransformed
+    const over = el.firstElementChild.scrollWidth - el.clientWidth;
+    if (over <= 1) return;
+    el.style.setProperty("--over", over + "px");
+    el.style.setProperty("--dur", (over / 40 + 4).toFixed(1) + "s");
+    el.classList.add("scroll");
+  }
+
+  // Resizing the browser source changes what fits.
+  addEventListener("resize", () => [title, artist, album].forEach(fit));
+
   function show(t) {
     if (!t || !t.title) {
       np.classList.remove("show");
@@ -181,9 +227,9 @@
     since = performance.now();
 
     // textContent only: track metadata is whatever a file's tags say.
-    title.textContent = t.title;
-    artist.textContent = t.artist || "";
-    album.textContent = t.album || "";
+    setLine(title, t.title);
+    setLine(artist, t.artist);
+    setLine(album, t.album);
     if (t.art) img.src = t.art; else img.removeAttribute("src");
 
     // Duration 0 means the player didn't report one (a live stream, some web
