@@ -24,9 +24,10 @@
     display: flex;
     align-items: center;
     box-sizing: border-box;
-    /* Breathing room inside the browser source so the rounded corners and the
-       card's shadow aren't clipped flush against the screen edge. */
-    padding: 8px;
+    /* Breathing room inside the browser source: the card's shadow needs somewhere
+       to fall off, or it stops dead at the source edge. A 480x160 source fits the
+       default 96px cover with this to spare. */
+    padding: 16px;
     font-family: "Inter", "Segoe UI", system-ui, sans-serif;
     color: #fff;
   }
@@ -47,11 +48,13 @@
     font-size: var(--font);
     padding: 14px 18px 14px 14px;
     border-radius: 16px;
-    /* Hairline edge and a lifted shadow, so the card reads as a surface rather
-       than a rectangle of text. Both fade out with the panel. */
+    /* A hairline edge, a tight contact shadow and a wide ambient one, so the card
+       sits in the video instead of on top of it. All three scale with the panel,
+       so turning it off leaves no rectangular ghost behind. */
     box-shadow:
       inset 0 0 0 1px rgba(255, 255, 255, calc(var(--panel) * 0.28)),
-      0 8px 24px rgba(0, 0, 0, calc(var(--panel) * 0.6));
+      0 3px 10px rgba(0, 0, 0, var(--panel)),
+      0 12px 36px rgba(0, 0, 0, calc(var(--panel) * 1.15));
     transition: opacity 0.3s ease;
     /* Soft shadow rather than the chat overlay's hard four-offset outline: the
        panel already carries the contrast, and this stays legible if the panel
