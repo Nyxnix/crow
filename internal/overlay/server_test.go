@@ -2,15 +2,19 @@ package overlay
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Nyxnix/crow/internal/chat"
+	"github.com/Nyxnix/crow/internal/nowplaying"
 )
 
 func TestPublishReachesSubscriber(t *testing.T) {
@@ -289,5 +293,91 @@ func TestAlertSettingsSentOnConnectAndChange(t *testing.T) {
 	s.SetAlertOptions(map[string]int{"duration": 9})
 	if ev := readEvent(); !strings.Contains(ev, "event: alert_settings") || !strings.Contains(ev, `"duration":9`) {
 		t.Fatalf("after change got %q, want duration 9", ev)
+	}
+}
+
+// The now-playing path has the two pieces that can quietly break on stream:
+// local artwork has to become a URL the browser source can actually fetch, and
+// an unchanged track must not re-broadcast every poll tick.
+func TestNowPlayingArtAndDedupe(t *testing.T) {
+	dir := t.TempDir()
+	cover := filepath.Join(dir, "cover.png")
+	if err := os.WriteFile(cover, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New()
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	track := nowplaying.Track{
+		Title: "Song", Artist: "Artist", Album: "Album",
+		Art:      "file://" + cover,
+		Position: 30 * time.Second, Duration: 3*time.Minute + 20*time.Second,
+		Playing: true,
+	}
+	s.SetNowPlaying(track)
+
+	resp, err := http.Get(srv.URL + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	br := bufio.NewReader(resp.Body)
+
+	// The current track is replayed on connect, so a reloaded browser source
+	// isn't blank until the song changes.
+	var got wireTrack
+	if err := json.Unmarshal([]byte(readData(t, br)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "Song" || got.Artist != "Artist" || got.Album != "Album" {
+		t.Errorf("got %+v", got)
+	}
+	if got.Position != 30 || got.Duration != 200 || !got.Playing {
+		t.Errorf("times = %v/%v playing=%v, want 30/200 playing", got.Position, got.Duration, got.Playing)
+	}
+	if !strings.HasPrefix(got.Art, "/nowplaying/art?") {
+		t.Fatalf("art = %q, want the local file served back over http", got.Art)
+	}
+
+	art, err := http.Get(srv.URL + got.Art)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer art.Body.Close()
+	body, _ := io.ReadAll(art.Body)
+	if art.StatusCode != 200 || !bytes.HasPrefix(body, []byte("\x89PNG")) {
+		t.Errorf("art status %d, body %q", art.StatusCode, body)
+	}
+
+	// Same track again: nothing new on the wire.
+	s.SetNowPlaying(track)
+	s.SetNowPlaying(nowplaying.Track{Title: "Next"})
+	var next wireTrack
+	if err := json.Unmarshal([]byte(readData(t, br)), &next); err != nil {
+		t.Fatal(err)
+	}
+	if next.Title != "Next" {
+		t.Errorf("next frame = %q, want the changed track (unchanged ones must not re-broadcast)", next.Title)
+	}
+	if next.Art != "" {
+		t.Errorf("art = %q, want none for a track without artwork", next.Art)
+	}
+}
+
+// http(s) artwork (Spotify and friends) goes straight to the page.
+func TestNowPlayingRemoteArt(t *testing.T) {
+	s := New()
+	s.SetNowPlaying(nowplaying.Track{Title: "Song", Art: "https://i.scdn.co/image/abc"})
+	var got wireTrack
+	if err := json.Unmarshal(s.track, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Art != "https://i.scdn.co/image/abc" {
+		t.Errorf("art = %q, want the remote URL untouched", got.Art)
+	}
+	if s.artPath != "" {
+		t.Errorf("artPath = %q, want nothing served locally", s.artPath)
 	}
 }

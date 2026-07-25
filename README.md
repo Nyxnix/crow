@@ -12,6 +12,8 @@ Three things in one binary:
   source at, rendering chat on stream with a transparent background.
 - **An alerts overlay** at `http://127.0.0.1:7788/alerts` (a second browser
   source) popping follows, subs, bits, members and superchats.
+- **A now-playing overlay** at `http://127.0.0.1:7788/nowplaying` showing the
+  song your local player is on — cover, title, artist, album and progress.
 
 Emotes from 7TV, BetterTTV and FrankerFaceZ render everywhere — as images in
 the overlay, and inline in the TUI on terminals that speak the kitty graphics
@@ -48,6 +50,9 @@ The two OBS browser sources (shown here on a dark preview background,
   members/gift-memberships/superchats — on the alerts overlay and highlighted
   in the chat feed, along with messages that mention you
 - Live viewer count and uptime in the status bar
+- Now playing on the `/nowplaying` browser source, read from whatever media
+  player is running locally (Linux/MPRIS: Spotify, mpv, VLC, browsers,
+  Rhythmbox — no login, no per-player setup); `?art=<px>` sizes the cover
 - Settings menu (`Ctrl+S`): overlay options, alert toggles, chat scale,
   YouTube cookie login, test alerts
 

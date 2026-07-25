@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Crow now playing</title>
+<style>
+  :root {
+    --shadow: rgba(0, 0, 0, 0.8);
+    --art: 96px;
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    /* A browser source composites over video: no background, no scrollbars. */
+    background: transparent;
+    overflow: hidden;
+  }
+
+  body {
+    display: flex;
+    align-items: center;
+    font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+    color: #fff;
+  }
+
+  #np {
+    display: none;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    /* Same four-offset outline as the chat and alert overlays. */
+    text-shadow:
+      2px 0 var(--shadow), -2px 0 var(--shadow),
+      0 2px var(--shadow), 0 -2px var(--shadow),
+      2px 2px var(--shadow), -2px -2px var(--shadow),
+      2px -2px var(--shadow), -2px 2px var(--shadow);
+  }
+
+  #np.show { display: flex; }
+  #np.paused { opacity: 0.65; }
+
+  #art {
+    width: var(--art);
+    height: var(--art);
+    flex: none;
+    object-fit: cover;
+    border-radius: 6px;
+    filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.7));
+  }
+
+  #art:not([src]) { display: none; }
+
+  .meta {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .title {
+    font-size: 26px;
+    font-weight: 800;
+    line-height: 1.2;
+  }
+
+  .artist {
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  .album {
+    font-size: 16px;
+    font-weight: 500;
+    line-height: 1.3;
+    opacity: 0.8;
+  }
+
+  /* One line each, cut with an ellipsis: a browser source has a fixed width and
+     a wrapping title would shove the progress bar out of frame. */
+  .title, .artist, .album {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .album:empty, .artist:empty { display: none; }
+
+  .bar {
+    margin-top: 8px;
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.25);
+    box-shadow: 0 0 0 2px var(--shadow);
+    overflow: hidden;
+  }
+
+  .fill {
+    height: 100%;
+    width: 0;
+    background: #fff;
+  }
+
+  .bar.unknown { display: none; }
+
+  .times {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 3px;
+    font-size: 14px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .times.unknown { display: none; }
+</style>
+</head>
+<body>
+<div id="np">
+  <img id="art" alt="">
+  <div class="meta">
+    <div class="title"></div>
+    <div class="artist"></div>
+    <div class="album"></div>
+    <div class="bar"><div class="fill"></div></div>
+    <div class="times"><span class="elapsed"></span><span class="total"></span></div>
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+
+  const params = new URLSearchParams(location.search);
+  // ?bg=<css-color> fills the normally-transparent background, for previewing
+  // in a plain browser tab instead of OBS.
+  const bg = params.get("bg");
+  if (bg) document.body.style.background = bg;
+  // ?art=<px> resizes the cover; the text scales with the source in OBS.
+  const art = parseInt(params.get("art"), 10);
+  if (art > 0) document.documentElement.style.setProperty("--art", art + "px");
+
+  const np = document.getElementById("np");
+  const img = document.getElementById("art");
+  const title = np.querySelector(".title");
+  const artist = np.querySelector(".artist");
+  const album = np.querySelector(".album");
+  const bar = np.querySelector(".bar");
+  const fill = np.querySelector(".fill");
+  const times = np.querySelector(".times");
+  const elapsed = np.querySelector(".elapsed");
+  const total = np.querySelector(".total");
+
+  // The server polls the player about once a second; the page runs the clock
+  // between updates from the last known position so the bar moves smoothly.
+  let track = null, since = 0;
+
+  function mmss(s) {
+    s = Math.max(0, Math.floor(s));
+    const m = Math.floor(s / 60);
+    return m + ":" + String(s % 60).padStart(2, "0");
+  }
+
+  function tick() {
+    requestAnimationFrame(tick);
+    if (!track || !track.duration) return;
+    let pos = track.position;
+    if (track.playing) pos += (performance.now() - since) / 1000;
+    pos = Math.min(pos, track.duration);
+    fill.style.width = (pos / track.duration) * 100 + "%";
+    elapsed.textContent = mmss(pos);
+  }
+  requestAnimationFrame(tick);
+
+  function show(t) {
+    if (!t || !t.title) {
+      np.classList.remove("show");
+      track = null;
+      return;
+    }
+    track = t;
+    since = performance.now();
+
+    // textContent only: track metadata is whatever a file's tags say.
+    title.textContent = t.title;
+    artist.textContent = t.artist || "";
+    album.textContent = t.album || "";
+    if (t.art) img.src = t.art; else img.removeAttribute("src");
+
+    // Duration 0 means the player didn't report one (a live stream, some web
+    // players): drop the bar rather than show a meaningless full one.
+    const unknown = !t.duration;
+    bar.classList.toggle("unknown", unknown);
+    times.classList.toggle("unknown", unknown);
+    total.textContent = unknown ? "" : mmss(t.duration);
+    np.classList.toggle("paused", !t.playing);
+    np.classList.add("show");
+  }
+
+  const es = new EventSource("/events");
+  es.addEventListener("now_playing", (ev) => {
+    try { show(JSON.parse(ev.data)); } catch {}
+  });
+})();
+</script>
+</body>
+</html>

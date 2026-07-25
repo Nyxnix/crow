@@ -116,6 +116,12 @@ func (c Config) AlertsURL() string {
 	return "http://" + c.OverlayAddr + "/alerts"
 }
 
+// NowPlayingURL is the now-playing browser-source URL for OBS, showing the
+// track a local media player is on.
+func (c Config) NowPlayingURL() string {
+	return "http://" + c.OverlayAddr + "/nowplaying"
+}
+
 func path() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {

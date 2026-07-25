@@ -166,6 +166,7 @@ func newSettingsState(login string, cfg *config.Config) settingsState {
 		{label: "hide ! commands", boolp: &o.HideCommands},
 		{label: "hide bots (csv)", ti: bots, commit: func(s string) { o.Bots = strings.TrimSpace(s) }},
 		{label: "overlay url", display: cfg.OverlayURL},
+		{label: "now playing url", display: cfg.NowPlayingURL},
 	}
 
 	// The alerts page owns the separate alerts browser source: which events

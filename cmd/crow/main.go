@@ -24,6 +24,7 @@ import (
 	"github.com/Nyxnix/crow/internal/config"
 	"github.com/Nyxnix/crow/internal/emote"
 	"github.com/Nyxnix/crow/internal/ivr"
+	"github.com/Nyxnix/crow/internal/nowplaying"
 	"github.com/Nyxnix/crow/internal/overlay"
 	"github.com/Nyxnix/crow/internal/tui"
 	"github.com/Nyxnix/crow/internal/twitch"
@@ -120,6 +121,7 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 		// the overlay restyles without touching OBS. Polling mtime keeps it
 		// dependency-free; the TUI's own saves push directly and this is a no-op.
 		go watchConfig(ctx, ov)
+		go watchNowPlaying(ctx, ov)
 	}
 
 	// The pin is matched by source, not exact spec, so pinning a stable channel
@@ -240,6 +242,24 @@ func watchConfig(ctx context.Context, ov *overlay.Server) {
 			c := config.Load()
 			ov.SetOptions(c.Overlay)
 			ov.SetAlertOptions(c.Alerts)
+		}
+	}
+}
+
+// watchNowPlaying polls the local media player and pushes the current track to
+// the now-playing browser source. One second is finer than any listener notices
+// on a progress bar, and the page interpolates between ticks anyway; the server
+// only broadcasts when something actually changed, so a paused or absent player
+// is free.
+func watchNowPlaying(ctx context.Context, ov *overlay.Server) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		ov.SetNowPlaying(nowplaying.Now())
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
 		}
 	}
 }

@@ -10,15 +10,19 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Nyxnix/crow/internal/chat"
+	"github.com/Nyxnix/crow/internal/nowplaying"
 )
 
-//go:embed overlay.html alerts.html
+//go:embed overlay.html alerts.html nowplaying.html
 var assets embed.FS
 
 // zeroTime clears a write deadline rather than setting one.
@@ -40,6 +44,12 @@ type Server struct {
 	// alertSettings is the same for the alerts page, as its own SSE event name
 	// so the two pages' settings can't collide on the shared /events stream.
 	alertSettings []byte
+	// track is the last now-playing frame, replayed to browser sources on
+	// connect so a reloaded source shows the current song immediately.
+	track []byte
+	// artPath is the local file the current artwork lives at, served from
+	// /nowplaying/art because a browser source cannot load file:// URLs.
+	artPath string
 }
 
 func New() *Server {
@@ -104,6 +114,79 @@ func (s *Server) SetAlertOptions(v any) {
 	if changed {
 		s.broadcast(frame("alert_settings", b))
 	}
+}
+
+// wireTrack is the shape the now-playing page consumes. Times are seconds
+// (floats) because that is what the page does arithmetic in.
+type wireTrack struct {
+	Title    string  `json:"title"`
+	Artist   string  `json:"artist"`
+	Album    string  `json:"album"`
+	Art      string  `json:"art,omitempty"`
+	Position float64 `json:"position"`
+	Duration float64 `json:"duration"`
+	Playing  bool    `json:"playing"`
+}
+
+// SetNowPlaying publishes the track a local player is on, or a zero Track when
+// nothing is playing (the page hides itself). Unchanged state is not
+// re-broadcast, so a paused or idle player costs no traffic at all.
+func (s *Server) SetNowPlaying(t nowplaying.Track) {
+	w := wireTrack{
+		Title:    t.Title,
+		Artist:   t.Artist,
+		Album:    t.Album,
+		Position: t.Position.Seconds(),
+		Duration: t.Duration.Seconds(),
+		Playing:  t.Playing,
+	}
+	// Artwork is usually a local file the browser source cannot open, so those
+	// are served back out of /nowplaying/art. http(s) and data: URLs go straight
+	// to the page.
+	artPath := ""
+	switch {
+	case strings.HasPrefix(t.Art, "file://"):
+		if u, err := url.Parse(t.Art); err == nil {
+			artPath = u.Path
+			w.Art = fmt.Sprintf("/nowplaying/art?v=%08x", fnv32(t.Art))
+		}
+	case strings.HasPrefix(t.Art, "http://"), strings.HasPrefix(t.Art, "https://"), strings.HasPrefix(t.Art, "data:"):
+		w.Art = t.Art
+	}
+
+	b, err := json.Marshal(w)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	changed := !bytes.Equal(s.track, b)
+	s.track, s.artPath = b, artPath
+	s.mu.Unlock()
+	if changed {
+		s.broadcast(frame("now_playing", b))
+	}
+}
+
+func fnv32(s string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	return h.Sum32()
+}
+
+// handleArt serves the current track's local artwork file. The path never comes
+// from the request — only the player's metadata — so there is nothing to
+// traverse; the request just asks for "whatever is playing".
+func (s *Server) handleArt(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	p := s.artPath
+	s.mu.Unlock()
+	if p == "" {
+		http.NotFound(w, r)
+		return
+	}
+	// Players reuse the same temp path for successive covers, so never cache.
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, p)
 }
 
 // wireAlert is the shape the alerts page consumes: a complete event sentence
@@ -239,6 +322,8 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.HandleFunc("GET /{$}", page("overlay.html"))
 	mux.HandleFunc("GET /alerts", page("alerts.html"))
+	mux.HandleFunc("GET /nowplaying", page("nowplaying.html"))
+	mux.HandleFunc("GET /nowplaying/art", s.handleArt)
 	return mux
 }
 
@@ -263,13 +348,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// Current settings first, so the page styles itself before any message.
 	// Both blobs go to every client; each page listens only to its own event.
 	s.mu.Lock()
-	settings, alertSettings := s.settings, s.alertSettings
+	settings, alertSettings, track := s.settings, s.alertSettings, s.track
 	s.mu.Unlock()
 	if settings != nil {
 		w.Write(frame("settings", settings))
 	}
 	if alertSettings != nil {
 		w.Write(frame("alert_settings", alertSettings))
+	}
+	if track != nil {
+		w.Write(frame("now_playing", track))
 	}
 	rc.Flush()
 
