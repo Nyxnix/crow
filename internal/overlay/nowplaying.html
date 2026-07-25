@@ -44,17 +44,19 @@
     min-width: 0;
     position: relative;
     isolation: isolate;
-    overflow: hidden;
     font-size: var(--font);
     padding: 14px 18px 14px 14px;
     border-radius: 16px;
-    /* A hairline edge, a tight contact shadow and a wide ambient one, so the card
-       sits in the video instead of on top of it. All three scale with the panel,
-       so turning it off leaves no rectangular ghost behind. */
+    /* Two soft shadows that finish inside the 16px margin: a shadow wider than
+       that gets sliced off square by the edge of the browser source, which reads
+       as a hard box around the card — worse than no shadow at all. Faint, so the
+       clipped tail is invisible; the blurred cover behind does the real blending.
+       Both scale with the panel, so turning it off leaves no rectangular ghost.
+       No hairline border either: a 1px light edge reads as a harsh line once OBS
+       scales the source down. */
     box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, calc(var(--panel) * 0.28)),
-      0 3px 10px rgba(0, 0, 0, var(--panel)),
-      0 12px 36px rgba(0, 0, 0, calc(var(--panel) * 1.15));
+      0 2px 6px rgba(0, 0, 0, calc(var(--panel) * 0.5)),
+      0 5px 14px rgba(0, 0, 0, calc(var(--panel) * 0.38));
     transition: opacity 0.3s ease;
     /* Soft shadow rather than the chat overlay's hard four-offset outline: the
        panel already carries the contrast, and this stays legible if the panel
@@ -62,19 +64,21 @@
     text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6), 0 0 14px rgba(0, 0, 0, 0.4);
   }
 
-  /* The cover, blown up and blurred, is the panel: the card takes on the colour
-     of whatever is playing instead of being a grey box. */
+  /* The cover, blurred, is the panel: the card takes on the colour of whatever
+     is playing instead of being a grey box. It sits slightly proud of the card
+     and is blurred past its own rounded edge, so the colour spills out and
+     feathers the card's boundary into the video rather than ending on a line. */
   #np::before {
     content: "";
     position: absolute;
-    inset: 0;
+    inset: -10px;
     z-index: -2;
+    border-radius: 26px;
     background-image: var(--cover, none);
     background-size: cover;
     background-position: center;
-    transform: scale(1.8);
-    filter: blur(28px) saturate(1.8);
-    opacity: var(--panel);
+    filter: blur(22px) saturate(1.7);
+    opacity: calc(var(--panel) * 0.95);
   }
 
   /* Scrim over it: keeps text legible whatever the artwork looks like, and is
@@ -84,6 +88,7 @@
     position: absolute;
     inset: 0;
     z-index: -1;
+    border-radius: inherit;
     background: linear-gradient(
       100deg,
       rgba(8, 8, 10, calc(var(--panel) * 1.05)),
@@ -99,9 +104,7 @@
     flex: none;
     object-fit: cover;
     border-radius: 10px;
-    box-shadow:
-      0 6px 18px rgba(0, 0, 0, 0.55),
-      inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
   }
 
   #art.hide { display: none; }
@@ -169,7 +172,7 @@
     margin-top: 10px;
     height: 4px;
     border-radius: 99px;
-    background: rgba(255, 255, 255, 0.22);
+    background: rgba(255, 255, 255, 0.14);
     overflow: hidden;
   }
 
@@ -177,8 +180,8 @@
     height: 100%;
     width: 0;
     border-radius: inherit;
-    background: #fff;
-    box-shadow: 0 0 8px rgba(255, 255, 255, 0.45);
+    background: rgba(255, 255, 255, 0.9);
+    box-shadow: 0 0 10px rgba(255, 255, 255, 0.3);
   }
 
   .times {
