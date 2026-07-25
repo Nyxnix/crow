@@ -50,7 +50,7 @@
     /* No box-shadow and no border: both draw the card's exact rounded rectangle,
        and any hard outline around a panel that fades out at its edges puts the
        harsh line straight back. The panel layers below do all the blending. */
-    transition: opacity 0.3s ease;
+    transition: opacity 0.5s ease;
     /* Soft shadow rather than the chat overlay's hard four-offset outline: the
        panel already carries the contrast, and this stays legible if the panel
        is turned all the way down. */
@@ -95,6 +95,9 @@
 
   #np.show { display: flex; }
   #np.paused { opacity: 0.72; }
+  /* Paused and left that way: the card has nothing to say, so it gets out of
+     the shot. Later than .paused on purpose — same specificity, this one wins. */
+  #np.idle { opacity: 0; }
 
   #art {
     width: var(--art);
@@ -240,6 +243,10 @@
   // re-rendering the text on those would restart the scroll animation forever.
   let track = null, since = 0, trackKey = "";
 
+  // How long a paused player stays on screen before the card fades away.
+  const IDLE_MS = 5000;
+  let idleTimer = 0;
+
   function mmss(s) {
     s = Math.max(0, Math.floor(s));
     const m = Math.floor(s / 60);
@@ -300,7 +307,8 @@
 
   function show(t) {
     if (!cfg.enabled || !t || !t.title) {
-      np.classList.remove("show");
+      clearTimeout(idleTimer);
+      np.classList.remove("show", "idle");
       track = null;
       trackKey = "";
       return;
@@ -308,6 +316,12 @@
     track = t;
     since = performance.now();
     np.classList.toggle("paused", !t.playing);
+    // Any update wakes the card; if it's paused, it fades out again after
+    // IDLE_MS. The server only sends changes, so a paused player sends nothing
+    // and the timer runs out — but scrubbing while paused brings it back.
+    np.classList.remove("idle");
+    clearTimeout(idleTimer);
+    if (!t.playing) idleTimer = setTimeout(() => np.classList.add("idle"), IDLE_MS);
     np.classList.add("show"); // before meta(): fit() measures a visible card
 
     const key = [t.title, t.artist, t.album, t.art].join("|");
