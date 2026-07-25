@@ -109,6 +109,7 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 	ov := overlay.New()
 	ov.SetOptions(cfg.Overlay)
 	ov.SetAlertOptions(cfg.Alerts)
+	ov.SetNowPlayingOptions(cfg.NowPlaying)
 	if cfg.OverlayEnabled || headless {
 		ln, err := net.Listen("tcp", cfg.OverlayAddr)
 		if err != nil {
@@ -198,6 +199,7 @@ func run(ctx context.Context, channels []string, addrFlag string, headless bool)
 			config.Save(c)
 			ov.SetOptions(c.Overlay) // restyle connected browser sources live
 			ov.SetAlertOptions(c.Alerts)
+			ov.SetNowPlayingOptions(c.NowPlaying)
 		},
 		Channels:        initial,
 		RequestCode:     requestDeviceCode,
@@ -242,6 +244,7 @@ func watchConfig(ctx context.Context, ov *overlay.Server) {
 			c := config.Load()
 			ov.SetOptions(c.Overlay)
 			ov.SetAlertOptions(c.Alerts)
+			ov.SetNowPlayingOptions(c.NowPlaying)
 		}
 	}
 }
@@ -255,7 +258,13 @@ func watchNowPlaying(ctx context.Context, ov *overlay.Server) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
-		ov.SetNowPlaying(nowplaying.Now())
+		// Off in settings: don't even talk to the media player, and clear
+		// whatever the page was showing.
+		if ov.NowPlayingEnabled() {
+			ov.SetNowPlaying(nowplaying.Now())
+		} else {
+			ov.SetNowPlaying(nowplaying.Track{})
+		}
 		select {
 		case <-ctx.Done():
 			return

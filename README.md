@@ -52,8 +52,10 @@ The two OBS browser sources (shown here on a dark preview background,
 - Live viewer count and uptime in the status bar
 - Now playing on the `/nowplaying` browser source, read from whatever media
   player is running locally (Linux/MPRIS: Spotify, mpv, VLC, browsers,
-  Rhythmbox — no login, no per-player setup); `?art=<px>` sizes the cover
-- Settings menu (`Ctrl+S`): overlay options, alert toggles, chat scale,
+  Rhythmbox — no login, no per-player setup); cover size, text size, panel
+  opacity, progress bar and text scrolling are all in `Ctrl+S › now playing`
+- Settings menu (`Ctrl+S`): overlay options, alert toggles, now-playing
+  options, chat scale,
   YouTube cookie login, test alerts
 
 ## Channels and tabs

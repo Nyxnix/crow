@@ -44,6 +44,10 @@ type Server struct {
 	// alertSettings is the same for the alerts page, as its own SSE event name
 	// so the two pages' settings can't collide on the shared /events stream.
 	alertSettings []byte
+	// npSettings is the now-playing page's options, its own SSE event like the
+	// other two pages'; npOn mirrors its enabled flag for the poller.
+	npSettings []byte
+	npOn       bool
 	// track is the last now-playing frame, replayed to browser sources on
 	// connect so a reloaded source shows the current song immediately.
 	track []byte
@@ -126,6 +130,39 @@ type wireTrack struct {
 	Position float64 `json:"position"`
 	Duration float64 `json:"duration"`
 	Playing  bool    `json:"playing"`
+}
+
+// SetNowPlayingOptions publishes the now-playing page's options
+// (config.NowPlayingOptions, kept as `any` like SetOptions). Unchanged options
+// are not re-broadcast.
+func (s *Server) SetNowPlayingOptions(v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	// The poller asks whether to run at all, and only this flag is needed for
+	// that, so read it back out of the JSON rather than depending on the config
+	// package's type here.
+	var on struct {
+		Enabled bool `json:"enabled"`
+	}
+	json.Unmarshal(b, &on)
+
+	s.mu.Lock()
+	changed := !bytes.Equal(s.npSettings, b)
+	s.npSettings, s.npOn = b, on.Enabled
+	s.mu.Unlock()
+	if changed {
+		s.broadcast(frame("now_playing_settings", b))
+	}
+}
+
+// NowPlayingEnabled reports whether the now-playing source is on, so the poller
+// can skip talking to the media player entirely when it isn't.
+func (s *Server) NowPlayingEnabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.npOn
 }
 
 // SetNowPlaying publishes the track a local player is on, or a zero Track when
@@ -348,13 +385,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// Current settings first, so the page styles itself before any message.
 	// Both blobs go to every client; each page listens only to its own event.
 	s.mu.Lock()
-	settings, alertSettings, track := s.settings, s.alertSettings, s.track
+	settings, alertSettings, npSettings, track := s.settings, s.alertSettings, s.npSettings, s.track
 	s.mu.Unlock()
 	if settings != nil {
 		w.Write(frame("settings", settings))
 	}
 	if alertSettings != nil {
 		w.Write(frame("alert_settings", alertSettings))
+	}
+	if npSettings != nil {
+		w.Write(frame("now_playing_settings", npSettings))
 	}
 	if track != nil {
 		w.Write(frame("now_playing", track))

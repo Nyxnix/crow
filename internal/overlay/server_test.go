@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Nyxnix/crow/internal/chat"
+	"github.com/Nyxnix/crow/internal/config"
 	"github.com/Nyxnix/crow/internal/nowplaying"
 )
 
@@ -379,5 +380,27 @@ func TestNowPlayingRemoteArt(t *testing.T) {
 	}
 	if s.artPath != "" {
 		t.Errorf("artPath = %q, want nothing served locally", s.artPath)
+	}
+}
+
+// The poller asks the server whether the source is on, so the enabled flag has
+// to survive the trip through JSON.
+func TestNowPlayingOptionsDriveEnabled(t *testing.T) {
+	s := New()
+	if s.NowPlayingEnabled() {
+		t.Error("enabled before any options were set")
+	}
+	s.SetNowPlayingOptions(config.Default().NowPlaying)
+	if !s.NowPlayingEnabled() {
+		t.Error("default options should enable the source")
+	}
+	off := config.Default().NowPlaying
+	off.Enabled = false
+	s.SetNowPlayingOptions(off)
+	if s.NowPlayingEnabled() {
+		t.Error("still enabled after being switched off")
+	}
+	if !strings.Contains(string(s.npSettings), `"art":96`) {
+		t.Errorf("npSettings = %s, want the page's options", s.npSettings)
 	}
 }

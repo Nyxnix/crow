@@ -32,6 +32,9 @@ type Config struct {
 	// Alerts holds the stream-alert options the alerts browser source reads.
 	Alerts AlertOptions `json:"alerts"`
 
+	// NowPlaying holds the options for the now-playing browser source.
+	NowPlaying NowPlayingOptions `json:"now_playing"`
+
 	// YouTubeCookies is the user's youtube.com Cookie header, the primary way
 	// crow acts as their account on YouTube (send, moderate, card info) via the
 	// same innertube endpoints the web player uses — no Google Cloud client or
@@ -76,6 +79,17 @@ type AlertOptions struct {
 	Duration    int  `json:"duration"` // seconds each alert stays on screen
 }
 
+// NowPlayingOptions are the now-playing source's parameters, pushed to its page
+// over SSE like the other overlays' options.
+type NowPlayingOptions struct {
+	Enabled  bool `json:"enabled"`  // off: nothing is polled and the page stays empty
+	Art      int  `json:"art"`      // cover size in px; 0 hides the cover
+	Font     int  `json:"font"`     // base text size in px; the lines scale with it
+	Opacity  int  `json:"opacity"`  // backing panel opacity, 0-100
+	Progress bool `json:"progress"` // show the progress bar and times
+	Scroll   bool `json:"scroll"`   // scroll lines too wide for the source
+}
+
 // Default is the config used when none is saved yet.
 func Default() Config {
 	return Config{
@@ -100,6 +114,14 @@ func Default() Config {
 			GiftMembers: true,
 			Superchats:  true,
 			Duration:    6,
+		},
+		NowPlaying: NowPlayingOptions{
+			Enabled:  true,
+			Art:      96,
+			Font:     20,
+			Opacity:  45,
+			Progress: true,
+			Scroll:   true,
 		},
 	}
 }
@@ -152,6 +174,9 @@ func Load() Config {
 	}
 	if c.Alerts.Duration < 1 {
 		c.Alerts.Duration = Default().Alerts.Duration
+	}
+	if c.NowPlaying.Font < 1 {
+		c.NowPlaying.Font = Default().NowPlaying.Font
 	}
 	return c
 }

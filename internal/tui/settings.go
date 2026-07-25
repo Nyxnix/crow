@@ -20,6 +20,7 @@ const (
 	pageOverlay
 	pageAppearance
 	pageAlerts
+	pageNowPlaying
 	pageYouTube
 	pageCount
 )
@@ -123,6 +124,7 @@ func newSettingsState(login string, cfg *config.Config) settingsState {
 	main := []*srow{
 		{label: "overlay settings", open: pageOverlay},
 		{label: "alert settings", open: pageAlerts},
+		{label: "now playing", open: pageNowPlaying},
 		{label: "appearance", open: pageAppearance},
 		{label: "youtube login", open: pageYouTube},
 	}
@@ -166,7 +168,6 @@ func newSettingsState(login string, cfg *config.Config) settingsState {
 		{label: "hide ! commands", boolp: &o.HideCommands},
 		{label: "hide bots (csv)", ti: bots, commit: func(s string) { o.Bots = strings.TrimSpace(s) }},
 		{label: "overlay url", display: cfg.OverlayURL},
-		{label: "now playing url", display: cfg.NowPlayingURL},
 	}
 
 	// The alerts page owns the separate alerts browser source: which events
@@ -187,6 +188,22 @@ func newSettingsState(login string, cfg *config.Config) settingsState {
 		{label: "alerts url", display: cfg.AlertsURL},
 	}
 
+	// The now-playing page owns the third browser source: what the card shows
+	// for whatever the local media player is on. Options apply live.
+	npo := &cfg.NowPlaying
+	npArt := newInput(strconv.Itoa(npo.Art), 4)
+	npFont := newInput(strconv.Itoa(npo.Font), 4)
+	npOpacity := newInput(strconv.Itoa(npo.Opacity), 3)
+	np := []*srow{
+		{label: "now playing", boolp: &npo.Enabled},
+		{label: "cover size (px)", ti: npArt, commit: atoiKeep(&npo.Art)},
+		{label: "text size (px)", ti: npFont, commit: atoiKeep(&npo.Font)},
+		{label: "panel opacity %", ti: npOpacity, commit: atoiKeep(&npo.Opacity)},
+		{label: "progress bar", boolp: &npo.Progress},
+		{label: "scroll long text", boolp: &npo.Scroll},
+		{label: "now playing url", display: cfg.NowPlayingURL},
+	}
+
 	// The appearance page is crow's own look. Terminal text comes in whole-cell
 	// multiples (kitty's text sizing protocol), not arbitrary pixels.
 	var appearance []*srow
@@ -202,6 +219,7 @@ func newSettingsState(login string, cfg *config.Config) settingsState {
 	st.rows[pageOverlay] = overlay
 	st.rows[pageAppearance] = appearance
 	st.rows[pageAlerts] = alerts
+	st.rows[pageNowPlaying] = np
 	st.rows[pageYouTube] = yt
 	st.refocus()
 	return st
@@ -226,7 +244,7 @@ func (a *App) settingsKeyInner(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		switch st.page {
-		case pageAppearance, pageOverlay, pageAlerts, pageYouTube:
+		case pageAppearance, pageOverlay, pageAlerts, pageNowPlaying, pageYouTube:
 			st.page = pageMain
 		default:
 			if len(a.tabs) > 0 {
@@ -471,6 +489,8 @@ func (a *App) settingsView() string {
 		title = "Appearance"
 	case pageAlerts:
 		title = "Alerts"
+	case pageNowPlaying:
+		title = "Now playing"
 	case pageYouTube:
 		title = "YouTube"
 	}
@@ -553,6 +573,11 @@ func (a *App) settingsView() string {
 		if st.alertStatus != "" {
 			b.WriteString(s.key.Render(st.alertStatus) + "\n")
 		}
+		b.WriteString("\n" + s.key.Render("↑/↓") + s.dim.Render(" move · ") +
+			s.key.Render("←/→/enter") + s.dim.Render(" change · ") +
+			s.key.Render("esc") + s.dim.Render(" back"))
+	case pageNowPlaying:
+		b.WriteString(s.dim.Render("applies live; reads whatever media player is running (MPRIS)") + "\n")
 		b.WriteString("\n" + s.key.Render("↑/↓") + s.dim.Render(" move · ") +
 			s.key.Render("←/→/enter") + s.dim.Render(" change · ") +
 			s.key.Render("esc") + s.dim.Render(" back"))
