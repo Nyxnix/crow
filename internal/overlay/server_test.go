@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -303,7 +306,7 @@ func TestAlertSettingsSentOnConnectAndChange(t *testing.T) {
 func TestNowPlayingArtAndDedupe(t *testing.T) {
 	dir := t.TempDir()
 	cover := filepath.Join(dir, "cover.png")
-	if err := os.WriteFile(cover, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+	if err := os.WriteFile(cover, onePixelPNG(t), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -402,5 +405,73 @@ func TestNowPlayingOptionsDriveEnabled(t *testing.T) {
 	}
 	if !strings.Contains(string(s.npSettings), `"art":96`) {
 		t.Errorf("npSettings = %s, want the page's options", s.npSettings)
+	}
+}
+
+// onePixelPNG is a complete, decodable cover file.
+func onePixelPNG(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// A player rewrites its cover file in place while fetching it, and hands out a
+// fresh temp path per track. Serving that file live is what made the overlay
+// draw half an image and reload art it already had.
+func TestNowPlayingArtIsSnapshotAndContentVersioned(t *testing.T) {
+	dir := t.TempDir()
+	full, half := onePixelPNG(t), onePixelPNG(t)
+	half = half[:len(half)-8] // truncated: still being written
+
+	partial := filepath.Join(dir, "partial.png")
+	if err := os.WriteFile(partial, half, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	s.SetNowPlaying(nowplaying.Track{Title: "Song", Art: "file://" + partial})
+	var got wireTrack
+	json.Unmarshal(s.track, &got)
+	if got.Art != "" {
+		t.Errorf("art = %q, want none until the file is complete", got.Art)
+	}
+
+	// Completed in place, same path: the art now appears.
+	if err := os.WriteFile(partial, full, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.SetNowPlaying(nowplaying.Track{Title: "Song", Art: "file://" + partial})
+	json.Unmarshal(s.track, &got)
+	first := got.Art
+	if first == "" {
+		t.Fatal("no art once the file is complete")
+	}
+
+	// Same picture at a new path (players churn temp files): the URL must not
+	// change, or the browser refetches art it already has and the cover blinks.
+	other := filepath.Join(dir, "other.png")
+	if err := os.WriteFile(other, full, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.SetNowPlaying(nowplaying.Track{Title: "Song", Art: "file://" + other})
+	json.Unmarshal(s.track, &got)
+	if got.Art != first {
+		t.Errorf("art url = %q, want %q — same bytes must keep the same url", got.Art, first)
+	}
+
+	// A different picture must get a different URL, or the browser keeps the old.
+	green := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	green.Set(0, 0, color.RGBA{0, 255, 0, 255})
+	var buf bytes.Buffer
+	png.Encode(&buf, green)
+	if err := os.WriteFile(other, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.SetNowPlaying(nowplaying.Track{Title: "Other", Art: "file://" + other})
+	json.Unmarshal(s.track, &got)
+	if got.Art == first || got.Art == "" {
+		t.Errorf("art url = %q, want a new url for new bytes", got.Art)
 	}
 }

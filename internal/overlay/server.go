@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -51,9 +52,14 @@ type Server struct {
 	// track is the last now-playing frame, replayed to browser sources on
 	// connect so a reloaded source shows the current song immediately.
 	track []byte
-	// artPath is the local file the current artwork lives at, served from
+	// artPath/art/artVer hold the current cover: the file it came from, a
+	// snapshot of its bytes, and a version derived from those bytes. Served from
 	// /nowplaying/art because a browser source cannot load file:// URLs.
 	artPath string
+	art     []byte
+	artVer  string
+	artSize int64
+	artMod  time.Time
 }
 
 func New() *Server {
@@ -180,12 +186,12 @@ func (s *Server) SetNowPlaying(t nowplaying.Track) {
 	// Artwork is usually a local file the browser source cannot open, so those
 	// are served back out of /nowplaying/art. http(s) and data: URLs go straight
 	// to the page.
-	artPath := ""
 	switch {
 	case strings.HasPrefix(t.Art, "file://"):
 		if u, err := url.Parse(t.Art); err == nil {
-			artPath = u.Path
-			w.Art = fmt.Sprintf("/nowplaying/art?v=%08x", fnv32(t.Art))
+			if ver := s.cacheArt(u.Path); ver != "" {
+				w.Art = "/nowplaying/art?v=" + ver
+			}
 		}
 	case strings.HasPrefix(t.Art, "http://"), strings.HasPrefix(t.Art, "https://"), strings.HasPrefix(t.Art, "data:"):
 		w.Art = t.Art
@@ -197,11 +203,68 @@ func (s *Server) SetNowPlaying(t nowplaying.Track) {
 	}
 	s.mu.Lock()
 	changed := !bytes.Equal(s.track, b)
-	s.track, s.artPath = b, artPath
+	s.track = b
 	s.mu.Unlock()
 	if changed {
 		s.broadcast(frame("now_playing", b))
 	}
+}
+
+// maxArt caps how much cover art is held in memory. Album art is tens of
+// kilobytes; anything past this is not a cover.
+const maxArt = 16 << 20
+
+// cacheArt snapshots a cover file into memory and returns a version string
+// derived from its bytes, or "" if there is nothing good to serve.
+//
+// Reading it once, up front, is what keeps the overlay steady. Players rewrite
+// their cover file in place as they fetch it and hand out a fresh temp path per
+// track, so serving the file live meant the browser could fetch it mid-write and
+// draw half an image, and a path that changed without the picture changing made
+// the page reload art it already had. Versioning by content instead means the
+// URL only changes when the picture does, so the browser can cache it and the
+// cover stops flickering between updates.
+func (s *Server) cacheArt(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	s.mu.Lock()
+	// Same file, untouched since the last poll: nothing to re-read. Size and
+	// mtime are part of that check because players reuse one temp path for
+	// successive covers — matching on the path alone would pin the first cover
+	// of the session onto every later track.
+	if path == s.artPath && s.art != nil && st.Size() == s.artSize && st.ModTime().Equal(s.artMod) {
+		defer s.mu.Unlock()
+		return s.artVer
+	}
+	s.mu.Unlock()
+
+	// ponytail: reads on the poll goroutine, once per art change; if a network
+	// filesystem ever makes that stall, move it off the poll.
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 || len(b) > maxArt || !completeImage(b) {
+		return "" // half-written or unreadable: show no art rather than half of one
+	}
+	ver := fmt.Sprintf("%08x", fnv32(string(b)))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.artPath, s.art, s.artVer = path, b, ver
+	s.artSize, s.artMod = st.Size(), st.ModTime()
+	return ver
+}
+
+// completeImage reports whether the bytes end where the format says they should,
+// which is how a cover file still being written is caught.
+func completeImage(b []byte) bool {
+	switch {
+	case bytes.HasPrefix(b, []byte("\x89PNG\r\n\x1a\n")):
+		return bytes.HasSuffix(b, []byte("IEND\xae\x42\x60\x82"))
+	case bytes.HasPrefix(b, []byte("\xff\xd8")):
+		return bytes.HasSuffix(b, []byte("\xff\xd9"))
+	}
+	return true // some other format: no cheap end marker, take it as-is
 }
 
 func fnv32(s string) uint32 {
@@ -210,20 +273,21 @@ func fnv32(s string) uint32 {
 	return h.Sum32()
 }
 
-// handleArt serves the current track's local artwork file. The path never comes
-// from the request — only the player's metadata — so there is nothing to
-// traverse; the request just asks for "whatever is playing".
+// handleArt serves the current track's cover from the snapshot in memory. The
+// page never names a file — only "whatever is playing" — so there is no path
+// here to traverse.
 func (s *Server) handleArt(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	p := s.artPath
+	art := s.art
 	s.mu.Unlock()
-	if p == "" {
+	if art == nil {
 		http.NotFound(w, r)
 		return
 	}
-	// Players reuse the same temp path for successive covers, so never cache.
-	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, p)
+	// The ?v= in the URL is a hash of these bytes, so this response can be cached
+	// forever: a different picture is a different URL.
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	http.ServeContent(w, r, "art", zeroTime, bytes.NewReader(art))
 }
 
 // wireAlert is the shape the alerts page consumes: a complete event sentence

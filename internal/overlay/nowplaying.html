@@ -278,6 +278,33 @@
     el.classList.add("scroll");
   }
 
+  // setArt swaps the cover — both the <img> and the blurred panel behind it —
+  // but only once the new one has decoded, so a track change doesn't blink
+  // through an empty card. The server versions the URL by content, so the same
+  // picture keeps the same URL and is served from cache.
+  let artURL = "";
+  function setArt(url) {
+    if (!url || cfg.art <= 0) {
+      artURL = "";
+      img.classList.add("hide");
+      img.removeAttribute("src");
+      np.style.removeProperty("--cover");
+      return;
+    }
+    if (url === artURL) return;
+    artURL = url;
+    const pre = new Image();
+    pre.onload = () => {
+      if (artURL !== url) return; // a newer track won the race
+      img.src = url;
+      img.classList.remove("hide");
+      // Quotes and backslashes escaped so a path can't break out of url().
+      np.style.setProperty("--cover",
+        'url("' + url.replace(/[\\"]/g, "\\$&").replace(/[\n\r]/g, "") + '")');
+    };
+    pre.src = url;
+  }
+
   // meta renders the song itself. Only called when the song (or the layout)
   // changed, so the scroll animation runs uninterrupted in between.
   function meta(t) {
@@ -287,21 +314,7 @@
       el.firstElementChild.textContent = text[i] || "";
       el.style.display = text[i] ? "" : "none";
     });
-    // The same artwork backs the panel, blurred (--cover); quotes and
-    // backslashes are escaped so a path can't break out of the url() string.
-    if (t.art) {
-      np.style.setProperty("--cover",
-        'url("' + t.art.replace(/[\\"]/g, "\\$&").replace(/[\n\r]/g, "") + '")');
-    } else {
-      np.style.removeProperty("--cover");
-    }
-    if (t.art && cfg.art > 0) {
-      img.src = t.art;
-      img.classList.remove("hide");
-    } else {
-      img.classList.add("hide");
-      img.removeAttribute("src");
-    }
+    setArt(t.art);
     lines.forEach(fit);
   }
 
